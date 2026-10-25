@@ -96,6 +96,20 @@ See [Configuration Guide](docs/configuration.md) for all options.
 - **Tasks**: `POST /projects/:projectId/tasks`, `GET /tasks`, `GET /tasks/:id`, `POST /tasks/:id/cancel`
 - **WebSocket**: Connect to `ws://HOST:PORT/ws` and subscribe with `{ "type": "subscribe", "taskId": "<id>" }`
 
+## Discord Bot Integration
+
+CodeOrchestrator includes an isolated Discord Bridge (`integrations/discord/`) implementing slash commands under `/code`:
+
+- `/code projects`: View accessible projects
+- `/code run`: Submit single coding tasks
+- `/code job`: Submit multi-agent workflows with automated worker, auditor, and integration roles
+- `/code status`: Real-time status inspection
+- `/code audit`: Independent auditor findings and verification evidence
+- `/code report`: Final execution summaries
+- `/code cancel`: Idempotent task/job cancellation with explicit confirmation
+
+For full documentation and systemd setup, see [Discord Integration Guide](docs/discord-integration.md).
+
 Refer to:
 - [API Reference](docs/api-reference.md)
 - [WebSocket Protocol](docs/websocket.md)

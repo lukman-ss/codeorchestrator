@@ -71,6 +71,8 @@ export class AgentExecutionEngine {
     const env = { ...process.env, NINEROUTER_API_KEY };
 
     const child = spawn(OPENCODE_BIN, args, { cwd: workspacePath, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    const currentExec = activeExecutions.get(executionId);
+    if (currentExec) currentExec.process = child;
 
     dbRun("UPDATE job_subtasks SET process_pid = ?, process_identity = ?, workspace_path = ?, worktree_branch = ?, started_at = datetime('now') WHERE id = ?",
       [child.pid, `pid:${child.pid}:${executionId}`, workspacePath, branchName, subtask.id]);
@@ -186,6 +188,8 @@ Do NOT fabricate evidence. Execute relevant verification commands.` +
     const args = ['-m', auditModel, '--auto', '--pure', 'run', '--format', 'json', auditPrompt];
     const env = { ...process.env, NINEROUTER_API_KEY };
     const child = spawn(OPENCODE_BIN, args, { cwd: subtask.worktree_path || project.workspace_path, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    const currentAuditExec = activeExecutions.get(executionId);
+    if (currentAuditExec) currentAuditExec.process = child;
 
     dbRun('UPDATE agent_executions SET process_pid = ?, process_identity = ? WHERE id = ?',
       [child.pid, `pid:${child.pid}:${executionId}`, executionId]);

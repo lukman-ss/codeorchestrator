@@ -1,0 +1,16 @@
+{
+  "name": "codeorchestrator-discord",
+  "version": "1.0.0",
+  "description": "Discord Bridge for CodeOrchestrator",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test 'tests/**/*.test.js'"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "discord.js": "^14.18.0",
+    "ws": "^8.22.0"
+  }
+}

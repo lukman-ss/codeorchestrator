@@ -65,6 +65,8 @@ Use OpenCode JSON format output.`;
     const env = { ...process.env, NINEROUTER_API_KEY };
 
     const child = spawn(OPENCODE_BIN, args, { cwd: workspacePath, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    const currentRepairExec = activeExecutions.get(executionId);
+    if (currentRepairExec) currentRepairExec.process = child;
 
     dbRun(
       `UPDATE agent_executions SET process_pid = ?, process_identity = ?, started_at = datetime('now') WHERE id = ?`,
@@ -165,6 +167,8 @@ export class IntegrationAgent {
     const args = ['-m', integrationModel, '--auto', '--pure', 'run', '--format', 'json', integrationPrompt];
     const env = { ...process.env, NINEROUTER_API_KEY };
     const child = spawn(OPENCODE_BIN, args, { cwd: project.workspace_path, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    const currentIntegrationExec = activeExecutions.get(executionId);
+    if (currentIntegrationExec) currentIntegrationExec.process = child;
 
     dbRun('UPDATE agent_executions SET process_pid = ?, process_identity = ? WHERE id = ?', [child.pid, `pid:${child.pid}:${executionId}`, executionId]);
 

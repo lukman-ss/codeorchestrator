@@ -9,6 +9,7 @@ import { TaskLogger, cleanupTaskLogs } from './task-logger.js';
 import { statSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import logger from '../logger.js';
+import { eventBus } from '../realtime/event-bus.js';
 
 const emitter = new EventEmitter();
 const processes = new Map();
@@ -43,6 +44,9 @@ const emitPersisted = (taskId, type, data) => {
   buf.push({ type, taskId, timestamp: new Date().toISOString(), sequence: seq, data });
   if (buf.length > BUFFER_SIZE) buf.shift();
   emitter.emit(taskId, { type, taskId, timestamp: new Date().toISOString(), sequence: seq, data });
+  try {
+    eventBus.emit('*', { type, taskId, timestamp: new Date().toISOString(), sequence: seq, data });
+  } catch {}
 };
 
 export const getBuffer = (taskId) => buffers.get(taskId) || [];
@@ -52,7 +56,10 @@ export const offEvent = (taskId, cb) => emitter.off(taskId, cb);
 
 export const enqueueTask = (id) => {
   if (dispatchBlocked) return false;
-  if (!dispatchQueue.includes(id)) dispatchQueue.push(id);
+  if (!dispatchQueue.includes(id)) {
+    dispatchQueue.push(id);
+    emitPersisted(id, 'task.queued', { id });
+  }
   schedule();
   return true;
 };

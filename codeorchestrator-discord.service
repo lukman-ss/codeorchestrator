@@ -1,0 +1,28 @@
+[Unit]
+Description=CodeOrchestrator Discord Bridge Service
+Documentation=https://github.com/anomalyco/opencode
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=%USER%
+Group=%GROUP%
+WorkingDirectory=/path/to/coding-orchestrator/integrations/discord
+EnvironmentFile=/path/to/coding-orchestrator/.env
+ExecStart=/usr/bin/node /path/to/coding-orchestrator/integrations/discord/src/index.js
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=65535
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/path/to/coding-orchestrator/integrations/discord/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

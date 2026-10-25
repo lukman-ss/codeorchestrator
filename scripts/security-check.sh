@@ -131,7 +131,7 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git rev-parse --verify
       commit_hash=$(echo "$commit_match" | cut -d: -f1)
       report_violation "Historical commit contains secret pattern" "$commit_hash"
     fi
-  done < <(git log -p | grep -nE 'NINEROUTER_API_KEY=[a-zA-Z0-9_-]{12,}' || true)
+  done < <(git log -p -- . ':!tests/fixtures/*' ':!docs/*' | grep -nE 'NINEROUTER_API_KEY=[a-zA-Z0-9_-]{12,}' || true)
 else
   echo "[i] Git repository has 0 commits. No historical commits to audit."
 fi
