@@ -1,0 +1,25 @@
+[Unit]
+Description=Coding Orchestrator Service
+Documentation=https://github.com/anomalyco/opencode
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=%USER%
+Group=%GROUP%
+WorkingDirectory=/path/to/coding-orchestrator
+EnvironmentFile=/path/to/coding-orchestrator/.env
+ExecStart=/usr/bin/node /path/to/coding-orchestrator/src/server.js
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=65535
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

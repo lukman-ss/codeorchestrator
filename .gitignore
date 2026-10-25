@@ -1,0 +1,56 @@
+# Dependencies
+node_modules/
+.npm/
+
+# Environment and Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.cert
+*.crt
+
+# Runtime Database Artifacts
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Runtime Logs
+logs/
+*.log
+*.log.*
+*.log.gz
+
+# Test and Coverage Artifacts
+coverage/
+.nyc_output/
+
+# Temporary and Cache Directories
+.cache/
+.tmp/
+tmp/
+
+# Workspace and Worktree Runtime
+workspaces/
+.agent-worktrees/
+.opencode/
+
+# Stray local root artifacts
+/a.txt
+/b.txt
+/base.txt
+/conflict-test.txt
+/marker.txt
+/worker*.txt
+/server.js
+/test.js
+
+# OS Artifacts
+.DS_Store
+Thumbs.db
