@@ -1,3 +1,4 @@
+import { PermissionFlagsBits } from 'discord.js';
 import config from './config.js';
 
 export class AuthorizationService {
@@ -21,11 +22,63 @@ export class AuthorizationService {
 
   isChannelAllowed(channelId) {
     if (!channelId) return false;
+    // Optional allowlist: empty or unset automatically allows all channels accessible to the bot
     if (!this.config.allowedChannelIds || this.config.allowedChannelIds.length === 0) {
-      return false;
+      return true;
     }
     if (this.config.allowedChannelIds.includes('*')) return true;
     return this.config.allowedChannelIds.includes(channelId);
+  }
+
+  hasBotPermissions(interaction) {
+    if (!interaction) return false;
+
+    // Check interaction.botPermissions if explicitly provided (e.g. testing)
+    if (interaction.botPermissions !== undefined) {
+      if (typeof interaction.botPermissions?.has === 'function') {
+        const p = interaction.botPermissions;
+        return Boolean(
+          (p.has(PermissionFlagsBits.ViewChannel) || p.has('ViewChannel')) &&
+          (p.has(PermissionFlagsBits.SendMessages) || p.has('SendMessages'))
+        );
+      }
+      if (typeof interaction.botPermissions === 'boolean') {
+        return interaction.botPermissions;
+      }
+    }
+
+    // Check interaction.appPermissions (Discord standard on interaction payloads)
+    if (interaction.appPermissions) {
+      if (typeof interaction.appPermissions.has === 'function') {
+        const p = interaction.appPermissions;
+        return Boolean(
+          (p.has(PermissionFlagsBits.ViewChannel) || p.has('ViewChannel')) &&
+          (p.has(PermissionFlagsBits.SendMessages) || p.has('SendMessages'))
+        );
+      }
+      if (typeof interaction.appPermissions === 'boolean') {
+        return interaction.appPermissions;
+      }
+    }
+
+    // Check channel.permissionsFor if channel object exists
+    if (interaction.channel && typeof interaction.channel.permissionsFor === 'function') {
+      const botMember = interaction.guild?.members?.me || interaction.client?.user;
+      if (botMember) {
+        const perms = interaction.channel.permissionsFor(botMember);
+        if (perms && typeof perms.has === 'function') {
+          return Boolean(
+            (perms.has(PermissionFlagsBits.ViewChannel) || perms.has('ViewChannel')) &&
+            (perms.has(PermissionFlagsBits.SendMessages) || perms.has('SendMessages'))
+          );
+        }
+        if (typeof perms === 'boolean') {
+          return perms;
+        }
+      }
+    }
+
+    return true;
   }
 
   isUserAllowed(userId, memberRoles = []) {
@@ -95,25 +148,30 @@ export class AuthorizationService {
       return { allowed: false, reason: 'This server is not authorized to execute CodeOrchestrator commands.' };
     }
 
-    // 3. Enforce channel allowlist
+    // 3. Enforce channel allowlist (optional: empty/unset allows all bot-accessible channels)
     if (!this.isChannelAllowed(interaction.channelId)) {
       return { allowed: false, reason: 'Commands cannot be executed in this channel.' };
     }
 
-    // 4. Extract roles
+    // 4. Enforce bot Discord permissions in channel
+    if (!this.hasBotPermissions(interaction)) {
+      return { allowed: false, reason: 'Bot lacks required channel permissions (ViewChannel, SendMessages).' };
+    }
+
+    // 5. Extract roles
     const memberRoles = interaction.member?.roles?.cache
       ? Array.from(interaction.member.roles.cache.keys())
       : Array.isArray(interaction.member?.roles)
       ? interaction.member.roles
       : [];
 
-    // 5. Enforce user / role allowlist
+    // 6. Enforce user / role allowlist
     const userId = interaction.user?.id || interaction.userId;
     if (!this.isUserAllowed(userId, memberRoles)) {
       return { allowed: false, reason: 'You are not authorized to use CodeOrchestrator.' };
     }
 
-    // 6. Enforce command-level permissions
+    // 7. Enforce command-level permissions
     if (subcommand && !this.canExecuteCommand(subcommand, userId, memberRoles)) {
       return { allowed: false, reason: `You are not authorized to run the '/code ${subcommand}' command.` };
     }

@@ -115,6 +115,7 @@ export class OrchestratorEventListener {
   }
 
   startPollingFallback() {
+    this.pollActiveExecutions().catch(() => {});
     this.pollTimer = setInterval(async () => {
       if (this.isStopping) return;
       // If WS is down, poll all active executions

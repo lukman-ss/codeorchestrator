@@ -38,7 +38,7 @@ Coding Orchestrator spawns autonomous coding agents capable of reading, generati
 - **Structured Redaction**: Automated scrubbing of sensitive fields from structured application logs.
 - **Pre-Release Security Gate**: Repeatable local audit script (`scripts/security-check.sh`) verifying zero credential leakage, absence of private keys, and exclusion of runtime databases before code publication.
 - **Process Lifecycle Governance**: Process table tracking (`processes` Map) ensuring `SIGTERM` and `SIGKILL` are issued on task cancellation or server shutdown, preventing orphaned child processes.
-- **Discord Gateway Isolation & Egress Redaction**: Dedicated bridge running with default-deny allowlists, isolated interaction database (`bridge.db`), disabled direct messages, and automated scrubbing (`redactSensitive`) of credentials, internal IPs, and host paths before message dispatch. Detailed in [Discord Integration Guide](discord-integration.md).
+- **Discord Gateway Isolation & Egress Redaction**: Dedicated bridge running with default-deny guild/user allowlists, Hermes-style automatic channel discovery bounded by native Discord permissions (`ViewChannel`, `SendMessages`), originating-channel notification isolation, isolated interaction database (`bridge.db`), disabled direct messages, and automated scrubbing (`redactSensitive`) of credentials, internal IPs, and host paths before message dispatch. Detailed in [Discord Integration Guide](discord-integration.md).
 
 ---
 

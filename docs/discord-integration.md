@@ -72,6 +72,16 @@ https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot%20applic
 
 ---
 
+## 2.5 Channel Discovery & Routing Model
+
+Similar to Hermes, CodeOrchestrator discovers Discord channels automatically directly from incoming interactions (`interaction.channelId`):
+- **Automatic Channel Discovery**: No manual channel registration or static `DISCORD_ALLOWED_CHANNEL_IDS` list is required. The bot dynamically accepts commands in any channel where the bot has appropriate Discord permissions and the requesting user is authorized.
+- **Public & Private Channels**: Both public and private channels are supported without differentiating them via hardcoded IDs. Access to private channels is governed natively by Discord channel permissions. If the bot is invited to a private channel or granted `ViewChannel` + `SendMessages` permissions, it functions immediately without configuration changes or bot restarts.
+- **Originating-Channel Response Routing**: When a task or job is submitted, the originating channel ID is persisted alongside the execution record. All real-time progress cards, notifications, and terminal completion notices route exclusively to the originating channel.
+- **Optional Channel Allowlist**: `DISCORD_ALLOWED_CHANNEL_IDS` is completely optional. If left empty or unset, all bot-accessible channels in authorized guilds are permitted. If explicitly populated with snowflake IDs, it serves as an extra restriction layer.
+
+---
+
 ## 3. Configuration Variables
 
 Configure these settings in the private `.env` file:
@@ -82,7 +92,7 @@ Configure these settings in the private `.env` file:
 | `DISCORD_CLIENT_ID` | String | _None_ | Application ID for registering slash commands |
 | `DISCORD_GUILD_ID` | String | _Empty_ | Guild ID for instant guild-scoped slash command registration |
 | `DISCORD_ALLOWED_GUILD_IDS` | CSV | _Empty_ | Allowed Discord server IDs (default: DENY) |
-| `DISCORD_ALLOWED_CHANNEL_IDS`| CSV | _Empty_ | Allowed Discord channel IDs (default: DENY) |
+| `DISCORD_ALLOWED_CHANNEL_IDS`| CSV | _Empty_ | Optional allowed Discord channel IDs (default: auto-discovery in bot-accessible channels) |
 | `DISCORD_ALLOWED_USER_IDS` | CSV | _Empty_ | Allowed Discord user IDs (`*` or list of snowflake IDs) |
 | `DISCORD_ALLOWED_ROLE_IDS` | CSV | _Empty_ | Allowed Discord role IDs for authorization |
 | `DISCORD_ALLOWED_PROJECTS` | CSV | `*` | Project IDs/slugs accessible across the bot |
@@ -250,7 +260,8 @@ cd integrations/discord && npm start
 | Symptom | Cause | Solution |
 |---|---|---|
 | `Access Denied: This server is not authorized` | Guild not in allowlist | Add Guild ID to `DISCORD_ALLOWED_GUILD_IDS` in `.env` |
-| `Access Denied: Commands cannot be executed in this channel` | Channel not in allowlist | Add Channel ID to `DISCORD_ALLOWED_CHANNEL_IDS` in `.env` |
+| `Access Denied: Commands cannot be executed in this channel` | Optional `DISCORD_ALLOWED_CHANNEL_IDS` is configured and excludes this channel | Add Channel ID to `DISCORD_ALLOWED_CHANNEL_IDS` or clear the variable for auto-discovery |
+| `Access Denied: Bot lacks required channel permissions` | Bot lacks `ViewChannel` or `SendMessages` in this channel | Update channel permissions in Discord to grant the bot access |
 | `Access Denied: You are not authorized` | User ID or role not in allowlist | Add User ID to `DISCORD_ALLOWED_USER_IDS` or role to `DISCORD_ALLOWED_ROLE_IDS` |
 | Slash commands do not appear in Discord | Global commands take up to 1 hr to sync | Set `DISCORD_GUILD_ID` in `.env` for instant guild-level command registration |
 | `Failed to download prompt attachment` | Attachment expired or network failure | Re-submit prompt or paste specification as text prompt |
@@ -276,8 +287,9 @@ Audit komprehensif terhadap penanganan kerahasiaan data dan kredensial pada pemb
 - **Hermes Credentials**: Layanan Hermes beroperasi terpisah secara independen. Tidak ada token, bot session, atau konfigurasi Hermes yang disentuh, diubah, atau digunakan kembali oleh Discord Bridge.
 
 ### 11.2 Kontrol Akses & Batasan Otorisasi
-- **Default-Deny Access Policy**: Permintaan dari guild, channel, user, atau role yang tidak tercantum dalam konfigurasi allowlist (`DISCORD_ALLOWED_GUILD_IDS`, `DISCORD_ALLOWED_CHANNEL_IDS`, `DISCORD_ALLOWED_USER_IDS`, `DISCORD_ALLOWED_ROLE_IDS`) langsung ditolak dengan status *Access Denied*.
+- **Default-Deny Access Policy**: Permintaan dari guild, user, atau role yang tidak tercantum dalam konfigurasi allowlist (`DISCORD_ALLOWED_GUILD_IDS`, `DISCORD_ALLOWED_USER_IDS`, `DISCORD_ALLOWED_ROLE_IDS`) langsung ditolak dengan status *Access Denied*. Konfigurasi channel (`DISCORD_ALLOWED_CHANNEL_IDS`) bersifat opsional; jika kosong, kanal diizinkan berdasarkan hak akses native Discord bot (`ViewChannel`, `SendMessages`) dan otorisasi pengguna.
 - **DM Execution Disabled**: Interaksi Direct Message diblokir total (`dmPermission: false` dan pengecekan interaksi) guna mencegah eksfiltrasi di luar saluran resmi.
+- **Isolasi Saluran Asal (Originating Channel Isolation)**: Notifikasi progres dan pembaruan hasil selalu diarahkan kembali secara eksklusif ke channel asal eksekusi (`channel_id`), mencegah kebocoran informasi antar kanal.
 - **Isolasi Proyek (RBAC Granular)**: Akses proyek dibatasi melalui `DISCORD_ALLOWED_PROJECTS` dan mapping spesifik per-user `DISCORD_USER_PROJECTS`. Pengguna tidak dapat menjalankan tugas pada proyek di luar izin.
 - **Perintah Administratif Sensitif**: Perintah pembatalan (`/code cancel`) mewajibkan otorisasi administrator (`DISCORD_ADMIN_USER_IDS` atau `DISCORD_ADMIN_ROLE_IDS`) dan konfirmasi eksplisit.
 

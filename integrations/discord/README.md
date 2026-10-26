@@ -28,7 +28,7 @@ Discord User / Guild
 - **Real-Time Progress**: Live updates to a single persistent Discord message per task/job.
 - **Fail-Safe Persistence**: Mapping between Discord messages and jobs persists in SQLite (`data/bridge.db`).
 - **Throttling & Rate-Limit Protection**: Live message edits throttled to 2 seconds; terminal state flushes immediately.
-- **Strict Authorization**: Guild, channel, user, role, and project-level allowlists. Default DENY.
+- **Strict Authorization & Channel Discovery**: Guild, user, role, and project-level allowlists. Channel IDs are discovered automatically via Discord interactions and bounded by native Discord permissions; optional channel allowlist is supported. All progress routes strictly to the originating channel.
 - **Confidentiality & Redaction**: Automatically scrubs API keys, bearer tokens, private keys, RFC1918/Tailscale IPs, and deployment home directory paths.
 - **Mentions Suppression**: Enforces `allowedMentions: { parse: [] }` on all Discord messages.
 
@@ -42,8 +42,8 @@ npm install
 # DISCORD_BOT_TOKEN=...
 # DISCORD_CLIENT_ID=...
 # DISCORD_ALLOWED_GUILD_IDS=...
-# DISCORD_ALLOWED_CHANNEL_IDS=...
 # DISCORD_ALLOWED_USER_IDS=...
+# DISCORD_ALLOWED_CHANNEL_IDS= (Optional: leave blank for automatic discovery)
 
 # 3. Run unit tests
 npm test

@@ -206,11 +206,11 @@ export async function execute(interaction, eventListener = null) {
       case 'job':
         return await handleJob(interaction, userId, memberRoles, eventListener);
       case 'status':
-        return await handleStatus(interaction);
+        return await handleStatus(interaction, userId, memberRoles);
       case 'audit':
-        return await handleAudit(interaction);
+        return await handleAudit(interaction, userId, memberRoles);
       case 'report':
-        return await handleReport(interaction);
+        return await handleReport(interaction, userId, memberRoles);
       case 'cancel':
         return await handleCancel(interaction, userId, memberRoles);
       case 'help':
@@ -420,12 +420,18 @@ async function handleJob(interaction, userId, memberRoles, eventListener) {
   });
 }
 
-async function handleStatus(interaction) {
+async function handleStatus(interaction, userId, memberRoles) {
   const id = interaction.options.getString('id', true).trim();
 
   // Try checking Job first
   const job = await apiClient.getJob(id).catch(() => null);
   if (job) {
+    if (job.project_id && !auth.isProjectAllowedForUser(userId, memberRoles, { id: job.project_id, slug: job.project_slug })) {
+      return interaction.editReply({
+        content: '❌ Access Denied: You do not have permission to view execution details for this project.',
+        allowedMentions: safeMentions
+      });
+    }
     const agents = await apiClient.getJobAgents(id).catch(() => null);
     const content = formatJobCard(job, { agents });
     return interaction.editReply({
@@ -437,6 +443,12 @@ async function handleStatus(interaction) {
   // Check Task
   const task = await apiClient.getTask(id).catch(() => null);
   if (task) {
+    if (task.project_id && !auth.isProjectAllowedForUser(userId, memberRoles, { id: task.project_id, slug: task.project_slug })) {
+      return interaction.editReply({
+        content: '❌ Access Denied: You do not have permission to view execution details for this project.',
+        allowedMentions: safeMentions
+      });
+    }
     const content = formatTaskCard(task);
     return interaction.editReply({
       content,
@@ -450,8 +462,16 @@ async function handleStatus(interaction) {
   });
 }
 
-async function handleAudit(interaction) {
+async function handleAudit(interaction, userId, memberRoles) {
   const id = interaction.options.getString('id', true).trim();
+
+  const job = await apiClient.getJob(id).catch(() => null);
+  if (job && job.project_id && !auth.isProjectAllowedForUser(userId, memberRoles, { id: job.project_id, slug: job.project_slug })) {
+    return interaction.editReply({
+      content: '❌ Access Denied: You do not have permission to view audit details for this project.',
+      allowedMentions: safeMentions
+    });
+  }
 
   // 1. Check if ID is a subtask
   const audits = await apiClient.getSubtaskAudits(id).catch(() => null);
@@ -486,11 +506,17 @@ async function handleAudit(interaction) {
   });
 }
 
-async function handleReport(interaction) {
+async function handleReport(interaction, userId, memberRoles) {
   const id = interaction.options.getString('id', true).trim();
 
   const job = await apiClient.getJob(id).catch(() => null);
   if (job) {
+    if (job.project_id && !auth.isProjectAllowedForUser(userId, memberRoles, { id: job.project_id, slug: job.project_slug })) {
+      return interaction.editReply({
+        content: '❌ Access Denied: You do not have permission to view execution reports for this project.',
+        allowedMentions: safeMentions
+      });
+    }
     const report = await apiClient.getJobReport(id).catch(() => null);
     const formatted = formatFinalReport(report, job);
 
@@ -510,6 +536,12 @@ async function handleReport(interaction) {
 
   const task = await apiClient.getTask(id).catch(() => null);
   if (task) {
+    if (task.project_id && !auth.isProjectAllowedForUser(userId, memberRoles, { id: task.project_id, slug: task.project_slug })) {
+      return interaction.editReply({
+        content: '❌ Access Denied: You do not have permission to view execution reports for this project.',
+        allowedMentions: safeMentions
+      });
+    }
     const formatted = formatFinalReport(task, task);
     return interaction.editReply({
       content: formatted.content,

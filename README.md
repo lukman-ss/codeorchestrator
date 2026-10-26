@@ -98,7 +98,7 @@ See [Configuration Guide](docs/configuration.md) for all options.
 
 ## Discord Bot Integration
 
-CodeOrchestrator includes an isolated Discord Bridge (`integrations/discord/`) implementing slash commands under `/code`:
+CodeOrchestrator includes an isolated Discord Bridge (`integrations/discord/`) implementing slash commands under `/code` with Hermes-like automatic channel discovery and originating-channel notification routing:
 
 - `/code projects`: View accessible projects
 - `/code run`: Submit single coding tasks
