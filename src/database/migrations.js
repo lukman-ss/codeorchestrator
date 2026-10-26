@@ -157,7 +157,19 @@ export const migrations = [
     acquired_at TEXT NOT NULL DEFAULT (datetime('now')),
     heartbeat_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_integration_locks_project ON integration_locks(project_id)`
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_integration_locks_project ON integration_locks(project_id)`,
+
+  `CREATE TABLE IF NOT EXISTS project_operations (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL DEFAULT 'create',
+    status TEXT NOT NULL CHECK(status IN ('pending','validating','creating','cloning','registering','completed','failed')),
+    params_json TEXT NOT NULL,
+    result_json TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_project_operations_status ON project_operations(status)`
 ];
 
-export const currentSchemaVersion = 2;
+export const currentSchemaVersion = 3;

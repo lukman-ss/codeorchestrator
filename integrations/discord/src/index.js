@@ -145,8 +145,16 @@ export class DiscordBridgeApp {
           if (interaction.commandName === 'code') {
             await codeCommand.handleAutocomplete(interaction);
           }
+        } else if (interaction.isModalSubmit()) {
+          if (interaction.customId === 'modal_project_create') {
+            await codeCommand.handleModalSubmit(interaction);
+          }
         } else if (interaction.isButton()) {
-          await this.handleButtonInteraction(interaction);
+          if (interaction.customId.startsWith('btn_proj_')) {
+            await codeCommand.handleButton(interaction);
+          } else {
+            await this.handleButtonInteraction(interaction);
+          }
         }
       } catch (err) {
         console.error('[DiscordBridge] Error handling interaction:', err);

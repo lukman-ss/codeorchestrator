@@ -121,11 +121,14 @@ See [Configuration Guide](docs/configuration.md) for all options.
 
 CodeOrchestrator includes an isolated Discord Bridge (`integrations/discord/`) implementing slash commands under `/code` with Hermes-like automatic channel discovery and originating-channel notification routing:
 
+- `/code project create`: Create a persistent project workspace via an interactive modal form and confirmation card
+- `/code project import`: Register an unmanaged directory under workspace root with stack detection
+- `/code project info`: Inspect project details, git remote, default branch, model, and active sessions
+- `/code projects`: View accessible persistent coding workspaces with relative slugs and Git status
 - `/code chat`: Start or continue a standalone conversation without creating a project
 - `/code session`: Explicitly create a standalone or project-linked session
 - `/code resume`: Send follow-up prompt to an existing OpenCode session
 - `/code sessions`: List authorized standalone and project sessions
-- `/code projects`: View accessible persistent coding workspaces
 - `/code run`: Submit single coding tasks to a project workspace
 - `/code job`: Submit multi-agent workflows with automated worker, auditor, and integration roles
 - `/code status`: Real-time task, job, or session status inspection

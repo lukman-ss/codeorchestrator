@@ -74,6 +74,35 @@ export class OrchestratorApiClient {
     return this.request(`/projects/${id}`);
   }
 
+  async createProject(data) {
+    return this.request('/projects', {
+      method: 'POST',
+      body: data
+    });
+  }
+
+  async createProjectAsync(data) {
+    return this.request('/projects', {
+      method: 'POST',
+      body: { ...data, async: true }
+    });
+  }
+
+  async getProjectOperation(id) {
+    return this.request(`/projects/operations/${id}`);
+  }
+
+  async importProject({ directory, name, isTest } = {}) {
+    return this.request('/projects/import', {
+      method: 'POST',
+      body: { directory, name, isTest }
+    });
+  }
+
+  async getProjectTasks(projectId) {
+    return this.request(`/projects/${projectId}/tasks`);
+  }
+
   async resolveProject(idOrSlug) {
     if (!idOrSlug) return null;
     const projects = await this.fetchProjects();

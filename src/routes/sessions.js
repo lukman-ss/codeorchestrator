@@ -7,29 +7,29 @@ const createSessionSchema = z.object({
   type: z.enum(['standalone', 'project']).optional(),
   projectId: z.string().uuid().optional().nullable(),
   project_id: z.string().uuid().optional().nullable(),
-  model: z.string().optional(),
-  userId: z.string().optional(),
-  user_id: z.string().optional(),
-  metadata: z.record(z.any()).optional()
+  model: z.string().nullish(),
+  userId: z.string().nullish(),
+  user_id: z.string().nullish(),
+  metadata: z.record(z.any()).nullish()
 });
 
 const patchSessionSchema = z.object({
   title: z.string().optional(),
-  model: z.string().optional(),
+  model: z.string().nullish(),
   status: z.enum(['created', 'active', 'idle', 'interrupted', 'closed']).optional(),
-  userId: z.string().optional(),
-  user_id: z.string().optional(),
-  metadata: z.record(z.any()).optional(),
-  projectId: z.string().optional(),
-  project_id: z.string().optional(),
+  userId: z.string().nullish(),
+  user_id: z.string().nullish(),
+  metadata: z.record(z.any()).nullish(),
+  projectId: z.string().nullish(),
+  project_id: z.string().nullish(),
   type: z.string().optional(),
   session_type: z.string().optional()
 });
 
 const messageSchema = z.object({
   prompt: z.string().min(1).max(10000),
-  model: z.string().optional(),
-  userId: z.string().optional()
+  model: z.string().nullish(),
+  userId: z.string().nullish()
 });
 
 export default async function sessions(app) {

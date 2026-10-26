@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { PORT, HOST, API_AUTH_TOKEN, DATABASE_PATH, DISK_FREE_THRESHOLD_MB, REQUIRE_AUTH } from './config.js';
 import { init as initDb, close as closeDb } from './database/db.js';
+import { recoverOperations } from './services/project-operations.js';
 import { recoverRunning, startFromQueue, getGlobalRunning, getDiskStats, shutdownAll, checkDiskSpace, getDispatchQueue, blockDispatch } from './services/task-queue.js';
 import { cleanupTaskLogs } from './services/task-logger.js';
 import { scheduleCleanup } from './services/maintenance.js';
@@ -62,6 +63,7 @@ const server = fastify.server;
 const wss = setupWebSocket(server);
 
 initDb();
+recoverOperations();
 recoverRunning();
 scheduleCleanup();
 setInterval(cleanupTaskLogs, 24 * 3600 * 1000);

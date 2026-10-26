@@ -57,8 +57,24 @@ All commands are organized under the `/code` command group:
 
 ### Workspace Projects & Automation
 
+#### `/code project create name:<text>`
+- Initiates an interactive modal form for creating a new project.
+- **Interactive Modal**: Allows specifying Project Name (pre-filled), Description, GitHub Repository URL, and Branch.
+- **Safety & Confirmation Card**: Displays configuration summary with "Create Project" and "Cancel" buttons. Rejects double-clicks, expired tokens, and cross-user clicks.
+- **Asynchronous Execution & Status Polling**: Clones the repo asynchronously, polls `GET /projects/operations/:id`, and updates the user in real-time (`Cloning repository...`, `Registering project...`, `Project Created Successfully!`).
+
+#### `/code project import directory:<name> [name:<text>]`
+- Registers an unmanaged existing folder within `WORKSPACE_ROOT` as a project.
+- Automatically inspects the codebase for Git remotes (`origin`) and detects the technology stack (React, Node.js, Go, Rust, Python, etc.).
+
+#### `/code project info project:<name/slug/id>`
+- Displays comprehensive metadata for a specific project workspace.
+- Redacts absolute host filesystem paths and displays safe relative slugs.
+- Shows Git remote configuration, default branch, model, session count, and task counts.
+
 #### `/code projects [page:<num>]`
 - Lists available coding workspaces. Automatically filters out test projects (`is_test = 0`).
+- Displays relative slugs, Git remote status (`Configured` / `Not configured`), and default model without leaking host directories.
 
 #### `/code run project:<name> prompt:<text>`
 - Submits an individual task to the execution queue for a project workspace.

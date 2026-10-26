@@ -46,6 +46,7 @@ Coding Orchestrator spawns autonomous coding agents capable of reading, generati
 - **Test Isolation Harness**: Disposable test databases and dynamic ephemeral ports eliminate operational database pollution during automated test runs.
 - **Process Lifecycle Governance**: Process table tracking (`processes` Map) ensuring `SIGTERM` and `SIGKILL` are issued on task cancellation or server shutdown, preventing orphaned child processes.
 - **Discord Gateway Isolation & Egress Redaction**: Dedicated bridge running with default-deny guild/user allowlists, Hermes-style automatic channel discovery bounded by native Discord permissions (`ViewChannel`, `SendMessages`), originating-channel notification isolation, isolated interaction database (`bridge.db`), disabled direct messages, and automated scrubbing (`redactSensitive`) of credentials, internal IPs, and host paths before message dispatch. Detailed in [Discord Integration Guide](discord-integration.md).
+- **Safe Git Execution & Injection Prevention**: All remote URLs and branches are strictly validated against character sets and prohibited prefixes (e.g. leading dashes preventing argument injection). Remote repository clones pass `--config core.hooksPath=/dev/null`, separate arguments after `--`, and enforce non-interactive terminal environment (`GIT_TERMINAL_PROMPT=0`). On clone failure, workspace directories are safely rolled back and purged to prevent leakage or corruption.
 
 ---
 

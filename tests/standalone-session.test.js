@@ -79,6 +79,13 @@ test('5. Standalone Session Parameters: sets title, model, and userId', async ()
   assert.equal(res.body.title, 'Custom Session');
   assert.equal(res.body.model, '9router/ag/gemini-3.8-flash-high');
   assert.equal(res.body.user_id, 'user_12345');
+
+  const nullModelRes = await req('/sessions', 'POST', {
+    title: 'Null Model Session',
+    model: null
+  });
+  assert.equal(nullModelRes.status, 201);
+  assert.equal(nullModelRes.body.model, null);
 });
 
 // 6. Standalone session metadata JSON

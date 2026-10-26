@@ -2,28 +2,37 @@ import { z } from 'zod';
 import * as ps from '../services/project-service.js';
 import * as ts from '../services/task-service.js';
 import * as ss from '../services/session-service.js';
+import * as po from '../services/project-operations.js';
 import { enqueueTask } from '../services/task-queue.js';
 
 const projectSchema = z.object({
   name: z.string().min(1),
-  slug: z.string().regex(/^[a-z0-9-]+$/),
-  repoUrl: z.string().url().optional(),
+  slug: z.string().regex(/^[a-z0-9-]+$/).optional(),
+  description: z.string().optional(),
+  repoUrl: z.string().optional(),
+  repositoryUrl: z.string().optional(),
+  branch: z.string().optional(),
+  defaultBranch: z.string().optional(),
   defaultModel: z.string().optional(),
+  initGit: z.boolean().optional(),
   isTest: z.union([z.boolean(), z.number()]).optional(),
-  metadata: z.record(z.any()).optional()
+  userId: z.string().optional(),
+  creatorUserId: z.string().optional(),
+  metadata: z.record(z.any()).optional(),
+  async: z.boolean().optional()
 });
 
 const taskSchema = z.object({
   prompt: z.string().min(1).max(10000),
-  model: z.string().optional(),
-  sessionId: z.string().uuid().optional()
+  model: z.string().nullish(),
+  sessionId: z.string().uuid().nullish()
 });
 
 const projectSessionSchema = z.object({
   title: z.string().optional(),
-  model: z.string().optional(),
-  userId: z.string().optional(),
-  metadata: z.record(z.any()).optional()
+  model: z.string().nullish(),
+  userId: z.string().nullish(),
+  metadata: z.record(z.any()).nullish()
 });
 
 export default async function projects(app) {
@@ -32,11 +41,30 @@ export default async function projects(app) {
   app.post('/', async (req, reply) => {
     try {
       const data = projectSchema.parse(req.body);
-      const isTestFlag = data.isTest === true || data.isTest === 1 || req.headers['x-test-mode'] === 'true' || false;
-      reply.code(201).send(ps.createProject({ ...data, isTest: isTestFlag }));
+      const isTestFlag =
+        data.isTest === true ||
+        data.isTest === 1 ||
+        req.headers['x-test-mode'] === 'true' ||
+        false;
+
+      if (data.async) {
+        const op = await po.startCreateOperation({ ...data, isTest: isTestFlag });
+        return reply.code(202).send(op);
+      }
+
+      const project = ps.createProject({ ...data, isTest: isTestFlag });
+      reply.code(201).send(project);
     } catch (e) {
       reply.code(400).send({ error: e.message });
     }
+  });
+
+  app.get('/operations/:id', async (req, reply) => {
+    const op = po.getProjectOperation(req.params.id);
+    if (!op) {
+      return reply.code(404).send({ error: 'Operation not found' });
+    }
+    reply.send(op);
   });
 
   app.get('/:id', async (req, reply) => {
@@ -57,7 +85,16 @@ export default async function projects(app) {
 
   app.post('/import', async (req, reply) => {
     try {
-      reply.send(ps.importProject(req.body.slug));
+      const slugOrDir = req.body?.directory || req.body?.slug;
+      const name = req.body?.name;
+      const isTest =
+        req.body?.isTest === true ||
+        req.body?.isTest === 1 ||
+        req.headers['x-test-mode'] === 'true' ||
+        process.env.NODE_ENV === 'test' ||
+        false;
+      const userId = req.body?.userId;
+      reply.send(ps.importProject(slugOrDir, { name, isTest, userId }));
     } catch (e) {
       reply.code(400).send({ error: e.message });
     }
@@ -101,17 +138,13 @@ export default async function projects(app) {
     try {
       const data = projectSessionSchema.parse(req.body || {});
       const session = ss.createSession({
-        projectId: req.params.id,
+        ...data,
         type: 'project',
-        title: data.title,
-        model: data.model,
-        userId: data.userId,
-        metadata: data.metadata
+        projectId: req.params.id
       });
       reply.code(201).send(session);
     } catch (e) {
-      const status = e.message.includes('not found') ? 404 : 400;
-      reply.code(status).send({ error: e.message });
+      reply.code(e.message === 'Project not found' ? 404 : 400).send({ error: e.message });
     }
   });
 }

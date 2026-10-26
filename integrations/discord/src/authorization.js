@@ -105,6 +105,13 @@ export class AuthorizationService {
     const projectSlug = project.slug || project;
     const projectId = project.id || project;
 
+    // Creator always has permission to their own project
+    if (typeof project === 'object' && project !== null) {
+      if (project.creator_user_id === userId || project.user_id === userId || project.metadata?.createdByUserId === userId) {
+        return true;
+      }
+    }
+
     // 1. Check user-specific project mappings first if configured
     if (this.config.userProjects && this.config.userProjects[userId]) {
       const allowedList = this.config.userProjects[userId];
@@ -143,8 +150,8 @@ export class AuthorizationService {
   canExecuteCommand(subcommand, userId, memberRoles = []) {
     if (!this.isUserAllowed(userId, memberRoles)) return false;
 
-    // Administrative commands like cancel can require specific admin rights
-    if (subcommand === 'cancel') {
+    // Privileged administrative commands require specific admin rights
+    if (subcommand === 'cancel' || subcommand === 'project:create' || subcommand === 'project:import') {
       const hasAdminUsers = this.config.adminUserIds && this.config.adminUserIds.length > 0;
       const hasAdminRoles = this.config.adminRoleIds && this.config.adminRoleIds.length > 0;
 

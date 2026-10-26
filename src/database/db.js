@@ -29,8 +29,13 @@ const baseTables = [
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
     workspace_path TEXT NOT NULL UNIQUE,
+    description TEXT,
     repo_url TEXT,
+    repository_url TEXT,
+    default_branch TEXT,
     default_model TEXT DEFAULT '9router/ayce-combo',
+    repository_provider TEXT,
+    creator_user_id TEXT,
     is_test INTEGER NOT NULL DEFAULT 0,
     metadata_json TEXT DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -83,6 +88,16 @@ const baseTables = [
     payload_json TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(task_id, sequence)
+  )`,
+  `CREATE TABLE IF NOT EXISTS project_operations (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL DEFAULT 'create',
+    status TEXT NOT NULL CHECK(status IN ('pending','validating','creating','cloning','registering','completed','failed')),
+    params_json TEXT NOT NULL,
+    result_json TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`
 ];
 
@@ -93,6 +108,7 @@ const ensureIndexes = () => {
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);
     CREATE INDEX IF NOT EXISTS idx_projects_test ON projects(is_test);
+    CREATE INDEX IF NOT EXISTS idx_project_operations_status ON project_operations(status);
   `);
 };
 
@@ -138,6 +154,18 @@ export const init = () => {
     for (const sql of baseTables) db.exec(sql);
   });
   tx();
+
+  const projectCols = db.prepare('PRAGMA table_info(projects)').all();
+  if (projectCols.length > 0) {
+    const colNames = new Set(projectCols.map(c => c.name));
+    if (!colNames.has('description')) db.exec('ALTER TABLE projects ADD COLUMN description TEXT;');
+    if (!colNames.has('repository_url')) db.exec('ALTER TABLE projects ADD COLUMN repository_url TEXT;');
+    if (!colNames.has('default_branch')) db.exec('ALTER TABLE projects ADD COLUMN default_branch TEXT;');
+    if (!colNames.has('repository_provider')) db.exec('ALTER TABLE projects ADD COLUMN repository_provider TEXT;');
+    if (!colNames.has('creator_user_id')) db.exec('ALTER TABLE projects ADD COLUMN creator_user_id TEXT;');
+    db.exec("UPDATE projects SET repository_url = repo_url WHERE repository_url IS NULL AND repo_url IS NOT NULL;");
+  }
+
   initMigrations();
   const txMigrations = db.transaction(() => {
     for (const sql of allMigrations) db.exec(sql);

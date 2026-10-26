@@ -3,12 +3,17 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  AttachmentBuilder
+  AttachmentBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle
 } from 'discord.js';
+import { randomUUID } from 'node:crypto';
 import apiClient from '../api-client.js';
 import auth from '../authorization.js';
 import persistence from '../persistence.js';
 import config from '../config.js';
+import { generateSlug, validateGitHubUrl } from '../../../../src/services/project-service.js';
 import {
   formatJobCard,
   formatTaskCard,
@@ -21,10 +26,57 @@ import {
   formatErrorPayload
 } from '../notifications.js';
 
+export const pendingCreations = new Map();
+
 export const data = new SlashCommandBuilder()
   .setName('code')
   .setDescription('CodeOrchestrator management and execution')
   .setDMPermission(false)
+  .addSubcommandGroup(group =>
+    group
+      .setName('project')
+      .setDescription('Project workspace operations')
+      .addSubcommand(sub =>
+        sub
+          .setName('create')
+          .setDescription('Create a persistent coding project workspace')
+          .addStringOption(opt =>
+            opt
+              .setName('name')
+              .setDescription('Project name')
+              .setRequired(true)
+          )
+      )
+      .addSubcommand(sub =>
+        sub
+          .setName('import')
+          .setDescription('Register an existing directory under WORKSPACE_ROOT as a project')
+          .addStringOption(opt =>
+            opt
+              .setName('directory')
+              .setDescription('Directory name inside workspace root')
+              .setRequired(true)
+          )
+          .addStringOption(opt =>
+            opt
+              .setName('name')
+              .setDescription('Optional project display name')
+              .setRequired(false)
+          )
+      )
+      .addSubcommand(sub =>
+        sub
+          .setName('info')
+          .setDescription('Display detailed information about a project')
+          .addStringOption(opt =>
+            opt
+              .setName('project')
+              .setDescription('Project name, slug, or ID')
+              .setRequired(true)
+              .setAutocomplete(true)
+          )
+      )
+  )
   .addSubcommand(sub =>
     sub
       .setName('projects')
@@ -288,9 +340,71 @@ export async function handleAutocomplete(interaction) {
 }
 
 export async function execute(interaction, eventListener = null) {
+  const group = typeof interaction.options.getSubcommandGroup === 'function'
+    ? interaction.options.getSubcommandGroup(false)
+    : null;
   const subcommand = interaction.options.getSubcommand();
+  const commandKey = group ? `${group}:${subcommand}` : subcommand;
 
-  const authCheck = auth.validateInteraction(interaction, subcommand);
+  if (commandKey === 'project:create') {
+    const authCheck = auth.validateInteraction(interaction, 'project:create');
+    if (!authCheck.allowed) {
+      return safeReply(interaction, {
+        content: `❌ **Access Denied**: ${authCheck.reason}`,
+        ephemeral: true,
+        allowedMentions: safeMentions
+      }, { type: 'auth_denied' });
+    }
+
+    const name = interaction.options.getString('name', true);
+
+    const modal = new ModalBuilder()
+      .setCustomId('modal_project_create')
+      .setTitle('Create Coding Project');
+
+    const nameInput = new TextInputBuilder()
+      .setCustomId('proj_name')
+      .setLabel('Project Name *')
+      .setStyle(TextInputStyle.Short)
+      .setValue(name)
+      .setRequired(true)
+      .setMaxLength(100);
+
+    const descInput = new TextInputBuilder()
+      .setCustomId('proj_desc')
+      .setLabel('Description')
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder('Project purpose or description')
+      .setRequired(false)
+      .setMaxLength(500);
+
+    const repoInput = new TextInputBuilder()
+      .setCustomId('proj_repo_url')
+      .setLabel('GitHub Repository URL')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('https://github.com/owner/repo.git or git@github-coding:...')
+      .setRequired(false)
+      .setMaxLength(255);
+
+    const branchInput = new TextInputBuilder()
+      .setCustomId('proj_branch')
+      .setLabel('Git Branch')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('main (leave empty for default)')
+      .setRequired(false)
+      .setMaxLength(100);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(nameInput),
+      new ActionRowBuilder().addComponents(descInput),
+      new ActionRowBuilder().addComponents(repoInput),
+      new ActionRowBuilder().addComponents(branchInput)
+    );
+
+    return await interaction.showModal(modal);
+  }
+
+  const authCheck = auth.validateInteraction(interaction, commandKey);
   if (!authCheck.allowed) {
     return safeReply(interaction, {
       content: `❌ **Access Denied**: ${authCheck.reason}`,
@@ -309,7 +423,11 @@ export async function execute(interaction, eventListener = null) {
     : [];
 
   try {
-    switch (subcommand) {
+    switch (commandKey) {
+      case 'project:import':
+        return await handleProjectImport(interaction, userId, memberRoles);
+      case 'project:info':
+        return await handleProjectInfo(interaction, userId, memberRoles);
       case 'projects':
         return await handleProjects(interaction, userId, memberRoles);
       case 'sessions':
@@ -345,6 +463,296 @@ export async function execute(interaction, eventListener = null) {
   }
 }
 
+async function handleProjectImport(interaction, userId, memberRoles) {
+  const directory = interaction.options.getString('directory', true);
+  const name = interaction.options.getString('name') || directory;
+
+  try {
+    const project = await apiClient.importProject({ directory, name, userId });
+    const gitStatus = project.repo_url || project.repository_url ? 'Configured' : 'Not configured';
+    const lines = [
+      '✅ **Workspace Registered Successfully!**',
+      '',
+      `• **Name**: **${project.name}**`,
+      `• **ID**: \`${project.id}\``,
+      `• **Workspace**: \`${project.slug}\``,
+      `• **Git**: ${gitStatus}`,
+      `• **Default Model**: \`${project.default_model || '9router/ayce-combo'}\``
+    ];
+    if (project.metadata?.stack) {
+      lines.push(`• **Technology**: ${project.metadata.stack}`);
+    }
+    return safeEditReply(interaction, {
+      content: lines.join('\n'),
+      allowedMentions: safeMentions
+    }, { type: 'project_imported' });
+  } catch (err) {
+    return safeEditReply(interaction, formatErrorPayload(err, { type: 'project_import_error' }));
+  }
+}
+
+async function handleProjectInfo(interaction, userId, memberRoles) {
+  const idOrSlug = interaction.options.getString('project', true);
+  const project = await apiClient.resolveProject(idOrSlug);
+
+  if (!project) {
+    return safeEditReply(interaction, {
+      content: `❌ Project \`${idOrSlug}\` not found.`,
+      allowedMentions: safeMentions
+    }, { type: 'project_not_found' });
+  }
+
+  if (!auth.isProjectAllowedForUser(userId, memberRoles, project)) {
+    return safeEditReply(interaction, {
+      content: '❌ **Access Denied**: You do not have permission to view this project.',
+      allowedMentions: safeMentions
+    }, { type: 'project_access_denied' });
+  }
+
+  const [sessions, tasks] = await Promise.all([
+    apiClient.fetchProjectSessions(project.id).catch(() => []),
+    apiClient.getProjectTasks(project.id).catch(() => [])
+  ]);
+
+  const gitConfigured = project.repo_url || project.repository_url;
+  const lines = [
+    '📁 **CodeOrchestrator Project Details**',
+    '',
+    `• **Name**: **${project.name}**`,
+    `• **Project ID**: \`${project.id}\``,
+    `• **Description**: ${project.description || 'No description provided'}`,
+    `• **Workspace**: \`${project.slug}\``,
+    `• **Git Remote**: ${gitConfigured ? `Configured (\`${gitConfigured}\`)` : 'Not configured'}`,
+    `• **Current Branch**: \`${project.default_branch || 'main'}\``,
+    `• **Default Model**: \`${project.default_model || '9router/ayce-combo'}\``,
+    `• **Associated Sessions**: ${sessions.length}`,
+    `• **Tasks / Jobs**: ${tasks.length}`,
+    `• **Created At**: ${project.created_at}`
+  ];
+
+  if (project.metadata?.stack) {
+    lines.push(`• **Technology**: ${project.metadata.stack}`);
+  }
+
+  const fullText = redactSensitive(lines.join('\n'));
+  return safeEditReply(interaction, {
+    content: fullText,
+    allowedMentions: safeMentions
+  }, { type: 'project_info' });
+}
+
+export async function handleModalSubmit(interaction) {
+  if (interaction.customId === 'modal_project_create') {
+    const userId = interaction.user?.id || interaction.userId;
+    const memberRoles = interaction.member?.roles?.cache
+      ? Array.from(interaction.member.roles.cache.keys())
+      : Array.isArray(interaction.member?.roles)
+      ? interaction.member.roles
+      : [];
+
+    const authCheck = auth.validateInteraction(interaction, 'project:create');
+    if (!authCheck.allowed) {
+      return safeReply(interaction, {
+        content: `❌ **Access Denied**: ${authCheck.reason}`,
+        ephemeral: true,
+        allowedMentions: safeMentions
+      }, { type: 'auth_denied' });
+    }
+
+    const name = interaction.fields.getTextInputValue('proj_name')?.trim();
+    const description = interaction.fields.getTextInputValue('proj_desc')?.trim() || '';
+    const repoUrl = interaction.fields.getTextInputValue('proj_repo_url')?.trim() || '';
+    const branch = interaction.fields.getTextInputValue('proj_branch')?.trim() || '';
+
+    const slug = generateSlug(name);
+    if (!slug) {
+      return safeReply(interaction, {
+        content: '❌ **Invalid Project Name**: Name must contain valid alphanumeric characters.',
+        ephemeral: true,
+        allowedMentions: safeMentions
+      }, { type: 'validation_error' });
+    }
+
+    if (repoUrl) {
+      const urlCheck = validateGitHubUrl(repoUrl);
+      if (!urlCheck.valid) {
+        return safeReply(interaction, {
+          content: `❌ **Invalid GitHub URL**: ${urlCheck.error}`,
+          ephemeral: true,
+          allowedMentions: safeMentions
+        }, { type: 'validation_error' });
+      }
+    }
+
+    const pendingId = randomUUID();
+    pendingCreations.set(pendingId, {
+      userId,
+      name,
+      slug,
+      description,
+      repoUrl: repoUrl || null,
+      branch: branch || null,
+      defaultModel: '9router/ayce-combo',
+      timestamp: Date.now()
+    });
+
+    const lines = [
+      '### Project Configuration',
+      '',
+      `• **Name**: ${name}`,
+      `• **Slug**: \`${slug}\``,
+      `• **GitHub**: ${repoUrl || 'Not configured'}`,
+      `• **Mode**: ${repoUrl ? 'Clone existing repository' : 'New local project'}`,
+      `• **Branch**: ${branch || (repoUrl ? 'Repository default' : 'N/A')}`,
+      `• **Model**: \`9router/ayce-combo\``,
+      ''
+    ];
+
+    const confirmBtn = new ButtonBuilder()
+      .setCustomId(`btn_proj_confirm:${pendingId}`)
+      .setLabel('Create Project')
+      .setStyle(ButtonStyle.Success);
+
+    const cancelBtn = new ButtonBuilder()
+      .setCustomId(`btn_proj_cancel:${pendingId}`)
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Secondary);
+
+    const row = new ActionRowBuilder().addComponents(confirmBtn, cancelBtn);
+
+    return safeReply(interaction, {
+      content: lines.join('\n'),
+      components: [row],
+      ephemeral: true,
+      allowedMentions: safeMentions
+    }, { type: 'project_confirmation' });
+  }
+}
+
+export async function handleButton(interaction) {
+  const customId = interaction.customId;
+  const userId = interaction.user?.id || interaction.userId;
+
+  if (customId.startsWith('btn_proj_cancel:')) {
+    const pendingId = customId.replace('btn_proj_cancel:', '');
+    const pending = pendingCreations.get(pendingId);
+    if (pending && pending.userId !== userId) {
+      return safeReply(interaction, { content: 'Only the original requester can cancel this setup.', ephemeral: true });
+    }
+    pendingCreations.delete(pendingId);
+    return interaction.update({
+      content: '🚫 Project creation cancelled.',
+      components: []
+    });
+  }
+
+  if (customId.startsWith('btn_proj_confirm:')) {
+    const pendingId = customId.replace('btn_proj_confirm:', '');
+    const pending = pendingCreations.get(pendingId);
+    if (!pending) {
+      return safeReply(interaction, {
+        content: '⚠️ This setup has expired or was already submitted.',
+        ephemeral: true
+      });
+    }
+    if (pending.userId !== userId) {
+      return safeReply(interaction, {
+        content: 'Only the original requester can confirm this creation.',
+        ephemeral: true
+      });
+    }
+
+    // Double submission prevention: remove immediately!
+    pendingCreations.delete(pendingId);
+
+    await interaction.update({
+      content: `⏳ Initializing project **${pending.name}**...`,
+      components: []
+    });
+
+    try {
+      const opRes = await apiClient.createProjectAsync({
+        name: pending.name,
+        slug: pending.slug,
+        description: pending.description,
+        repoUrl: pending.repoUrl,
+        branch: pending.branch,
+        defaultModel: pending.defaultModel,
+        userId
+      });
+
+      const operationId = opRes.operationId;
+      let finalResult = null;
+      let finalError = null;
+
+      for (let i = 0; i < 40; i++) {
+        await new Promise(r => setTimeout(r, 1500));
+        const op = await apiClient.getProjectOperation(operationId);
+        if (!op) break;
+
+        if (op.status === 'cloning') {
+          await safeEditReply(interaction, {
+            content: `⏳ Cloning repository \`${pending.repoUrl}\` (branch: \`${pending.branch || 'default'}\`)...`
+          }, { type: 'project_progress' }).catch(() => {});
+        } else if (op.status === 'registering') {
+          await safeEditReply(interaction, {
+            content: '⏳ Registering project workspace in database...'
+          }, { type: 'project_progress' }).catch(() => {});
+        } else if (op.status === 'completed') {
+          finalResult = op.result;
+          break;
+        } else if (op.status === 'failed') {
+          finalError = op.error;
+          break;
+        }
+      }
+
+      if (finalError) {
+        return safeEditReply(interaction, {
+          content: `❌ **Project Creation Failed**: ${redactSensitive(finalError)}`,
+          components: [],
+          allowedMentions: safeMentions
+        }, { type: 'project_error' });
+      }
+
+      if (!finalResult) {
+        return safeEditReply(interaction, {
+          content: '❌ **Project Creation Timed Out**: Workspace creation took longer than expected.',
+          components: [],
+          allowedMentions: safeMentions
+        }, { type: 'project_timeout' });
+      }
+
+      const successLines = [
+        '✅ **Project Created Successfully!**',
+        '',
+        `• **Name**: **${finalResult.name}**`,
+        `• **ID**: \`${finalResult.id}\``,
+        `• **Slug**: \`${finalResult.slug}\``,
+        `• **Workspace**: \`${finalResult.slug}\``,
+        `• **Git Remote**: ${finalResult.repo_url ? `\`${finalResult.repo_url}\`` : 'Not configured'}`,
+        `• **Branch**: \`${finalResult.default_branch || 'main'}\``,
+        `• **Default Model**: \`${finalResult.default_model}\``
+      ];
+      if (finalResult.metadata?.stack) {
+        successLines.push(`• **Technology**: ${finalResult.metadata.stack}`);
+      }
+
+      return safeEditReply(interaction, {
+        content: redactSensitive(successLines.join('\n')),
+        components: [],
+        allowedMentions: safeMentions
+      }, { type: 'project_success' });
+    } catch (err) {
+      return safeEditReply(interaction, {
+        content: redactSensitive(`❌ **Project Creation Failed**: ${err.message}`),
+        components: [],
+        allowedMentions: safeMentions
+      }, { type: 'project_error' });
+    }
+  }
+}
+
 async function handleProjects(interaction, userId, memberRoles) {
   const page = interaction.options.getInteger('page') || 1;
   const pageSize = 5;
@@ -375,8 +783,8 @@ async function handleProjects(interaction, userId, memberRoles) {
   for (const p of pageProjects) {
     lines.push(`• Name:      ${p.name}`);
     lines.push(`  ID:        ${p.id}`);
-    lines.push(`  Slug:      ${p.slug}`);
-    lines.push(`  Workspace: ${p.workspace_path}`);
+    lines.push(`  Workspace: ${p.slug}`);
+    lines.push(`  Git:       ${p.repo_url || p.repository_url ? 'Configured' : 'Not configured'}`);
     lines.push(`  Model:     ${p.default_model || 'default'}`);
     lines.push('');
   }
@@ -486,7 +894,7 @@ async function handleSessions(interaction, userId, memberRoles) {
 async function handleChat(interaction, userId, memberRoles) {
   const prompt = interaction.options.getString('prompt', true);
   const sessionInput = interaction.options.getString('session');
-  const modelOverride = interaction.options.getString('model');
+  const modelOverride = interaction.options.getString('model') || undefined;
 
   let session = null;
 
@@ -555,7 +963,7 @@ async function handleChat(interaction, userId, memberRoles) {
 async function handleSession(interaction, userId, memberRoles) {
   const title = interaction.options.getString('title', true);
   const projectInput = interaction.options.getString('project');
-  const model = interaction.options.getString('model');
+  const model = interaction.options.getString('model') || undefined;
 
   if (projectInput) {
     const project = await apiClient.resolveProject(projectInput);
@@ -1029,6 +1437,15 @@ async function handleHelp(interaction) {
     '• **Job**: Multi-agent workflow with requirement breakdown, workers, and independent audits.',
     '',
     '**Commands:**',
+    '`/code project create name:<name>`',
+    'Interactively create a persistent project workspace (optional GitHub clone, branch, description).',
+    '',
+    '`/code project import directory:<dir> [name:<name>]`',
+    'Register an existing directory under workspace root as a project.',
+    '',
+    '`/code project info project:<name|slug|id>`',
+    'View detailed project metadata, Git status, session counts, and stack.',
+    '',
     '`/code chat prompt:<text> [session:<id>] [model:<model>]`',
     'Start or continue a standalone conversation without selecting a project.',
     '',

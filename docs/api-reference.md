@@ -133,17 +133,63 @@ curl "http://127.0.0.1:4000/projects?includeTest=true" -H "Authorization: Bearer
 ```
 
 ### `POST /projects`
-Creates a project workspace directory under `WORKSPACE_ROOT`.
+Creates a project workspace directory under `WORKSPACE_ROOT`. Supports Mode A (empty directory with `git init`) and Mode B (GitHub clone via HTTPS or SSH).
+
+Parameters:
+- `name` (string, required): Display name of the project.
+- `slug` (string, optional): Unique URL-friendly slug. Auto-generated from name if omitted.
+- `description` (string, optional): Project purpose.
+- `repoUrl` (string, optional): GitHub URL (`https://github.com/...`, `git@github.com:...`, or `git@github-coding:...`).
+- `branch` (string, optional): Git branch to check out or initialize.
+- `defaultModel` (string, optional): Model override (default `9router/ayce-combo`).
+- `initGit` (boolean, optional): Initialize empty git repo on branch `main` when `repoUrl` is omitted.
+- `async` (boolean, optional): When `true`, returns HTTP 202 Accepted and executes asynchronously.
+- `isTest` (boolean, optional): Mark as test artifact (excluded from normal listings).
 
 ```bash
+# Synchronous project creation
 curl -X POST http://127.0.0.1:4000/projects \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Backend Service",
-    "slug": "backend-service",
+    "description": "Core backend API",
     "defaultModel": "9router/ayce-combo",
-    "isTest": false
+    "initGit": true
+  }'
+
+# Asynchronous clone
+curl -X POST http://127.0.0.1:4000/projects \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Client App",
+    "repoUrl": "git@github-coding:org/client-app.git",
+    "branch": "main",
+    "async": true
+  }'
+```
+
+### `GET /projects/operations/:id`
+Retrieves progress and final result of an asynchronous project operation.
+
+```bash
+curl http://127.0.0.1:4000/projects/operations/<OPERATION_ID> \
+  -H "Authorization: Bearer <TOKEN>"
+```
+
+Status lifecycle: `pending` -> `validating` -> `creating` -> `cloning` -> `registering` -> `completed` (or `failed`).
+
+### `POST /projects/import`
+Registers an existing unmanaged workspace folder under `WORKSPACE_ROOT` into the database. Idempotent.
+
+```bash
+curl -X POST http://127.0.0.1:4000/projects/import \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "directory": "my-legacy-app",
+    "name": "My Legacy App"
   }'
 ```
 
