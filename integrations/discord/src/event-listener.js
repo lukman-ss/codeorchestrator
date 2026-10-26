@@ -1,6 +1,12 @@
 import WebSocket from 'ws';
 import config from './config.js';
-import { formatJobCard, formatTaskCard, safeMentions } from './notifications.js';
+import {
+  formatJobCard,
+  formatTaskCard,
+  safeMentions,
+  safeMessageEdit,
+  safeChannelSend
+} from './notifications.js';
 
 export class OrchestratorEventListener {
   constructor(apiClient, persistence, discordClient, cfg = config) {
@@ -328,26 +334,26 @@ export class OrchestratorEventListener {
 
       const message = await channel.messages.fetch(exec.message_id).catch(() => null);
       if (message) {
-        await message.edit({
+        await safeMessageEdit(message, {
           content,
           allowedMentions: safeMentions
-        });
+        }, { type: 'progress_card' });
       } else if (isTerminal) {
         // If original message is missing and terminal, send new message to notify
-        await channel.send({
+        await safeChannelSend(channel, {
           content,
           allowedMentions: safeMentions
-        });
+        }, { type: 'progress_card' });
       }
 
       // If terminal, send final completion notification if requested
       if (isTerminal) {
         const terminalStatus = (exec.status || '').toUpperCase();
         const notification = `Execution \`${id}\` reached terminal state: **${terminalStatus}**`;
-        await channel.send({
+        await safeChannelSend(channel, {
           content: notification,
           allowedMentions: safeMentions
-        }).catch(() => {});
+        }, { type: 'terminal_notification' }).catch(() => {});
       }
     } catch {}
   }

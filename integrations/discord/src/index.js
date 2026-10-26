@@ -14,7 +14,13 @@ import persistence from './persistence.js';
 import auth from './authorization.js';
 import { OrchestratorEventListener } from './event-listener.js';
 import codeCommand, { data as codeCommandData } from './commands/code.js';
-import { safeMentions } from './notifications.js';
+import {
+  safeMentions,
+  safeReply,
+  safeEditReply,
+  formatErrorPayload,
+  redactSensitive
+} from './notifications.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PID_FILE = resolve(__dirname, '../bridge.pid');
@@ -28,10 +34,14 @@ export class DiscordBridgeApp {
   }
 
   acquireLock() {
-    if (existsSync(PID_FILE)) {
+    const pidFile = this.config?.pidFile || PID_FILE;
+    if (existsSync(pidFile)) {
       try {
-        const oldPid = parseInt(readFileSync(PID_FILE, 'utf8'), 10);
+        const oldPid = parseInt(readFileSync(pidFile, 'utf8'), 10);
         if (oldPid && !isNaN(oldPid)) {
+          if (oldPid === process.pid) {
+            return;
+          }
           // Check if process is still alive
           try {
             process.kill(oldPid, 0);
@@ -48,15 +58,16 @@ export class DiscordBridgeApp {
         if (!err.message.includes('ESRCH')) throw err;
       }
     }
-    writeFileSync(PID_FILE, process.pid.toString(), 'utf8');
+    writeFileSync(pidFile, process.pid.toString(), 'utf8');
   }
 
   releaseLock() {
     try {
-      if (existsSync(PID_FILE)) {
-        const storedPid = parseInt(readFileSync(PID_FILE, 'utf8'), 10);
+      const pidFile = this.config?.pidFile || PID_FILE;
+      if (existsSync(pidFile)) {
+        const storedPid = parseInt(readFileSync(pidFile, 'utf8'), 10);
         if (storedPid === process.pid) {
-          unlinkSync(PID_FILE);
+          unlinkSync(pidFile);
         }
       }
     } catch {}
@@ -141,15 +152,11 @@ export class DiscordBridgeApp {
         console.error('[DiscordBridge] Error handling interaction:', err);
         try {
           if (interaction.isRepliable()) {
-            const errPayload = {
-              content: `❌ Error: ${err.message}`,
-              allowedMentions: safeMentions,
-              ephemeral: true
-            };
+            const errPayload = formatErrorPayload(err, { type: 'interaction_error', ephemeral: true });
             if (interaction.deferred || interaction.replied) {
-              await interaction.editReply(errPayload);
+              await safeEditReply(interaction, errPayload, { type: 'interaction_error' });
             } else {
-              await interaction.reply(errPayload);
+              await safeReply(interaction, errPayload, { type: 'interaction_error' });
             }
           }
         } catch {}
@@ -173,11 +180,11 @@ export class DiscordBridgeApp {
 
       const authCheck = auth.validateInteraction(interaction, 'cancel');
       if (!authCheck.allowed) {
-        return interaction.reply({
+        return safeReply(interaction, {
           content: `❌ **Access Denied**: ${authCheck.reason}`,
           ephemeral: true,
           allowedMentions: safeMentions
-        });
+        }, { type: 'auth_denied' });
       }
 
       await interaction.deferUpdate();
@@ -192,17 +199,17 @@ export class DiscordBridgeApp {
 
         persistence.updateExecution(id, { status: 'cancelled' });
 
-        await interaction.editReply({
+        await safeEditReply(interaction, {
           content: `🛑 Execution \`${id}\` has been cancelled. Status: \`${cancelRes?.status || 'cancelled'}\`.`,
           components: [],
           allowedMentions: safeMentions
-        });
+        }, { type: 'cancel_success' });
       } catch (err) {
-        await interaction.editReply({
-          content: `❌ Failed to cancel \`${id}\`: ${err.message}`,
+        await safeEditReply(interaction, {
+          content: redactSensitive(`❌ Failed to cancel \`${id}\`: ${err.message}`),
           components: [],
           allowedMentions: safeMentions
-        });
+        }, { type: 'cancel_error' });
       }
     }
   }

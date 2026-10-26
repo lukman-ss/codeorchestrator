@@ -182,7 +182,47 @@ Discord interaction tokens expire after 15 minutes. Long-running jobs run signif
 
 ---
 
-## 7. Systemd Deployment
+## 7. Message Length & Response Formatting Architecture
+
+Discord enforces a strict 2,000 UTF-16 code unit limit on message content (`content[BASE_TYPE_MAX_LENGTH]`). To prevent Discord API errors, all outbound interactions, channel sends, progress edits, error messages, and reports route through a centralized message formatter (`src/message-formatter.js`).
+
+### 7.1 Dispatch Routing & Safe Limits
+- **Maximum Length**: Hard limit of 2,000 UTF-16 code units.
+- **Safe Chunk Size**: Content is chunked at <= 1,900 UTF-16 code units, leaving a safety margin for Markdown wrappers and system annotations.
+- **Short Messages**: Payloads <= 2,000 characters are dispatched normally as single messages.
+- **Unicode & Surrogate Pairs**: Chunks inspect UTF-16 high surrogate code units (`0xD800`–`0xDBFF`) before slicing to prevent splitting astral plane characters (emojis, complex symbols).
+- **Markdown Preservation**: When splitting code blocks, chunks automatically append closing backticks (`\n``` `) to the outgoing chunk and prepend opening backticks with language tags (` ```<lang>\n `) to the succeeding chunk.
+- **Channel Flooding Prevention**: General messages needing > 3 chunks or exceeding safe length generate a concise summary and attach the full sanitized content as a `.txt` file via `AttachmentBuilder`.
+
+### 7.2 Reports, Audits & Projects Fallback
+- **Execution Reports (`/code report`)**: Compact summary cards display verdicts, counts, and test results. Detailed report JSON is attached as `report-<id>.txt`.
+- **Audit Findings (`/code audit`)**: Large findings lists and evidence JSON are delivered as `audit-<id>.txt` attachments alongside verdict summary cards.
+- **Project Catalog (`/code projects`)**: Long project lists automatically summarize top entries and attach the full catalog as `projects.txt`.
+
+### 7.3 Error Handlers & Cascading Prevention
+- All interaction error catches utilize `formatErrorPayload()`, truncating error messages to at most 1,800 characters with `... (truncated)` annotations.
+- Safe dispatchers (`safeEditReply`, `safeReply`, `safeChannelSend`, `safeMessageEdit`) contain fallback handlers with minimal constant strings (< 50 characters) that can never trigger Discord message-length errors.
+
+### 7.4 Embed Validation
+When Discord embeds are used, `validateEmbeds()` validates and sanitizes:
+- Titles: <= 256 characters.
+- Descriptions: <= 4,096 characters.
+- Fields: <= 25 fields; names <= 256 characters, values <= 1,024 characters.
+- Footers: <= 2,048 characters.
+- Authors: <= 256 characters.
+- Total embed characters: <= 6,000 characters per message; maximum 10 embeds per message.
+- Secret redaction runs across all embed text properties.
+
+### 7.5 Oversized Message Auditing
+Whenever a message exceeds Discord limits, the formatter logs:
+```
+[DiscordBridge] Oversized message detected: length=<length>, type=<type>
+```
+Only the character length and message type are logged. Message contents and sensitive variables are never exposed in log entries.
+
+---
+
+## 8. Systemd Deployment
 
 ### 7.1 Service Unit File
 

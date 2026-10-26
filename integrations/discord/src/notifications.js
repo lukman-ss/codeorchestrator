@@ -1,50 +1,34 @@
-// Secret redaction patterns
-const SECRET_PATTERNS = [
-  // High entropy tokens and keys
-  /(?:NINEROUTER_API_KEY|ORCHESTRATOR_API_TOKEN|DISCORD_BOT_TOKEN)[=:][\s"']*([a-zA-Z0-9_\-\.]{10,})[\s"']*/gi,
-  /Bearer\s+([a-zA-Z0-9_\-\.]{15,})/gi,
-  /sk-[a-zA-Z0-9_\-]{20,}/gi,
-  /ghp_[a-zA-Z0-9]{36}/gi,
-  /github_pat_[a-zA-Z0-9_]{50,}/gi,
-  /xox[baprs]-[0-9a-zA-Z]{10,48}/gi,
-  /ey[A-Za-z0-9_-]{15,}\.ey[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}/gi,
-  // Discord bot token pattern: [24-28 chars].[6 chars].[27-38 chars]
-  /[MN][A-Za-z\d]{23,27}\.[\w-]{6}\.[\w-]{27,38}/g,
-  // Private keys
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi,
-  // Database passwords in URIs
-  /(postgres|mysql|sqlite|mongodb):\/\/[^:\s]+:([^@\s]+)@/gi,
-  // Tailscale and RFC1918 internal IPs
-  /(100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})/g,
-  // Specific user home directory paths
-  /\/home\/[a-zA-Z0-9_\-]+/g
-];
+import {
+  DISCORD_LIMITS,
+  safeMentions,
+  redactSensitive,
+  recordOversizedMessage,
+  splitTextIntoChunks,
+  validateEmbed,
+  validateEmbeds,
+  formatDiscordPayload,
+  formatErrorPayload,
+  safeEditReply,
+  safeReply,
+  safeChannelSend,
+  safeMessageEdit
+} from './message-formatter.js';
 
-export const redactSensitive = (input) => {
-  if (typeof input !== 'string') {
-    if (!input) return '';
-    input = JSON.stringify(input, null, 2);
-  }
-  let sanitized = input;
-
-  // Redact known patterns
-  sanitized = sanitized.replace(/(?:NINEROUTER_API_KEY|ORCHESTRATOR_API_TOKEN|DISCORD_BOT_TOKEN)[=:][\s"']*([a-zA-Z0-9_\-\.]{10,})[\s"']*/gi, (m, k) => m.replace(k, '[REDACTED]'));
-  sanitized = sanitized.replace(/Bearer\s+([a-zA-Z0-9_\-\.]{15,})/gi, 'Bearer [REDACTED]');
-  sanitized = sanitized.replace(/sk-[a-zA-Z0-9_\-]{20,}/gi, 'sk-[REDACTED]');
-  sanitized = sanitized.replace(/ghp_[a-zA-Z0-9]{36}/gi, 'ghp_[REDACTED]');
-  sanitized = sanitized.replace(/github_pat_[a-zA-Z0-9_]{50,}/gi, 'github_pat_[REDACTED]');
-  sanitized = sanitized.replace(/xox[baprs]-[0-9a-zA-Z]{10,48}/gi, '[REDACTED_SLACK_TOKEN]');
-  sanitized = sanitized.replace(/ey[A-Za-z0-9_-]{15,}\.ey[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}/gi, '[REDACTED_JWT]');
-  sanitized = sanitized.replace(/[MN][A-Za-z\d]{23,27}\.[\w-]{6}\.[\w-]{27,38}/g, '[REDACTED_DISCORD_TOKEN]');
-  sanitized = sanitized.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi, '[REDACTED_PRIVATE_KEY]');
-  sanitized = sanitized.replace(/(postgres|mysql|sqlite|mongodb):\/\/([^:]+):([^@]+)@/gi, '$1://$2:[REDACTED]@');
-  sanitized = sanitized.replace(/(100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})/g, '[REDACTED_IP]');
-  sanitized = sanitized.replace(/\/home\/[a-zA-Z0-9_\-]+/g, '~');
-
-  return sanitized;
+export {
+  DISCORD_LIMITS,
+  safeMentions,
+  redactSensitive,
+  recordOversizedMessage,
+  splitTextIntoChunks,
+  validateEmbed,
+  validateEmbeds,
+  formatDiscordPayload,
+  formatErrorPayload,
+  safeEditReply,
+  safeReply,
+  safeChannelSend,
+  safeMessageEdit
 };
-
-export const safeMentions = { parse: [] };
 
 export const formatJobCard = (job, { projectSlug = '', agents = null, latestEvent = null } = {}) => {
   const status = job.status || 'pending';
@@ -52,11 +36,10 @@ export const formatJobCard = (job, { projectSlug = '', agents = null, latestEven
   const verified = job.verified_requirements || 0;
   const proj = projectSlug || job.project_slug || job.project_id || 'unknown';
 
-  // Capitalize status for display
   const titleStatus = status.charAt(0).toUpperCase() + status.slice(1);
+  const safeLatest = latestEvent ? (String(latestEvent).length > 150 ? String(latestEvent).slice(0, 147) + '...' : String(latestEvent)) : null;
 
   if (status === 'completed') {
-    // Only claim PASS if verified by evidence
     const finalAudit = job.final_audit_verdict === 'PASS' ? 'PASS' : (job.final_audit_verdict || 'UNVERIFIED');
     return redactSensitive([
       '```',
@@ -97,7 +80,6 @@ export const formatJobCard = (job, { projectSlug = '', agents = null, latestEven
     ].join('\n'));
   }
 
-  // During execution (running, auditing, etc.)
   const activeWorkers = agents?.byRole?.worker ?? 0;
   const activeAuditors = agents?.byRole?.auditor ?? 0;
   const activeIntegrations = agents?.byRole?.integration ?? 0;
@@ -114,7 +96,7 @@ export const formatJobCard = (job, { projectSlug = '', agents = null, latestEven
     `Workers: ${activeWorkers} active`,
     `Auditors: ${activeAuditors} active`,
     `Integration: ${integrationState}`,
-    latestEvent ? `\nLatest: ${latestEvent}` : '',
+    safeLatest ? `\nLatest: ${safeLatest}` : '',
     '```'
   ].filter(line => line !== '').join('\n'));
 };
@@ -123,6 +105,7 @@ export const formatTaskCard = (task, { projectSlug = '', latestEvent = null } = 
   const status = task.status || 'queued';
   const proj = projectSlug || task.project_slug || task.project_id || 'unknown';
   const titleStatus = status.charAt(0).toUpperCase() + status.slice(1);
+  const safeLatest = latestEvent ? (String(latestEvent).length > 150 ? String(latestEvent).slice(0, 147) + '...' : String(latestEvent)) : null;
 
   if (status === 'completed') {
     return redactSensitive([
@@ -137,13 +120,14 @@ export const formatTaskCard = (task, { projectSlug = '', latestEvent = null } = 
   }
 
   if (status === 'failed' || status === 'cancelled' || status === 'interrupted') {
+    const errorStr = task.error ? (String(task.error).length > 150 ? String(task.error).slice(0, 147) + '...' : String(task.error)) : null;
     return redactSensitive([
       '```',
       'CodeOrchestrator',
       `Task: ${task.id}`,
       `Project: ${proj}`,
       `Status: ${titleStatus}`,
-      task.error ? `Error: ${task.error}` : `Exit Code: ${task.exit_code ?? 'N/A'}`,
+      errorStr ? `Error: ${errorStr}` : `Exit Code: ${task.exit_code ?? 'N/A'}`,
       '```'
     ].join('\n'));
   }
@@ -155,12 +139,11 @@ export const formatTaskCard = (task, { projectSlug = '', latestEvent = null } = 
       `Task: ${task.id}`,
       `Project: ${proj}`,
       `Status: Running`,
-      latestEvent ? `Latest: ${latestEvent}` : '',
+      safeLatest ? `Latest: ${safeLatest}` : '',
       '```'
     ].filter(Boolean).join('\n'));
   }
 
-  // Queued
   return redactSensitive([
     '```',
     'CodeOrchestrator',
@@ -180,7 +163,6 @@ export const formatAuditReport = (audits, subtaskId) => {
   const latest = audits[0];
   const verdict = latest.verdict || 'UNVERIFIED';
 
-  // Extract failed acceptance criteria safely
   let criteria = [];
   try {
     criteria = JSON.parse(latest.criteria_json || '[]');
@@ -199,19 +181,44 @@ export const formatAuditReport = (audits, subtaskId) => {
   const failedCriteria = criteria.filter(c => c.status === 'failed' || c.passed === false);
   const evidenceSummary = latest.summary || JSON.stringify(evidence).slice(0, 300);
 
-  const lines = [
+  const failedNames = failedCriteria.map(c => c.name || c.id || String(c)).join(', ');
+  const truncatedFailed = failedNames.length > 200 ? failedNames.slice(0, 197) + '...' : (failedNames || 'None');
+  const safeEvidence = evidenceSummary.length > 200 ? evidenceSummary.slice(0, 197) + '...' : evidenceSummary;
+
+  const summaryLines = [
     '```',
     'CodeOrchestrator — Audit Result',
     `Subtask ID: ${latest.subtask_id || subtaskId}`,
     `Auditor Verdict: ${verdict}`,
     `Attempts: ${audits.length}`,
-    `Failed Criteria: ${failedCriteria.length > 0 ? failedCriteria.map(c => c.name || c.id || c).join(', ') : 'None'}`,
+    `Failed Criteria: ${truncatedFailed}`,
     `Findings: ${findings.length > 0 ? findings.length : 'None'}`,
-    `Evidence: ${evidenceSummary}`,
+    `Evidence: ${safeEvidence}`,
     '```'
   ];
 
-  return redactSensitive(lines.join('\n'));
+  const fullFindings = JSON.stringify({
+    subtaskId: latest.subtask_id || subtaskId,
+    verdict,
+    attempts: audits.length,
+    failedCriteria,
+    findings,
+    evidence
+  }, null, 2);
+
+  const fullReportText = redactSensitive(summaryLines.join('\n') + '\n\nFindings & Evidence:\n' + fullFindings);
+
+  if (fullReportText.length > 1800) {
+    const res = new String(redactSensitive(summaryLines.join('\n')));
+    res.content = redactSensitive(summaryLines.join('\n'));
+    res.attachment = {
+      name: `audit-${subtaskId || 'report'}.txt`,
+      data: Buffer.from(fullReportText, 'utf8')
+    };
+    return res;
+  }
+
+  return redactSensitive(summaryLines.join('\n'));
 };
 
 export const formatFinalReport = (report, job = null) => {
@@ -238,12 +245,11 @@ export const formatFinalReport = (report, job = null) => {
 
   const fullReportText = redactSensitive(JSON.stringify(report || job, null, 2));
 
-  // If detailed report is too large for single message, return file attachment
-  if (fullReportText.length > 1800) {
+  if (summary.length + fullReportText.length + 30 > 1800) {
     return {
       content: redactSensitive(summary),
       attachment: {
-        name: `report-${job?.id || 'job'}.txt`,
+        name: `report-${job?.id || report?.jobId || 'job'}.txt`,
         data: Buffer.from(fullReportText, 'utf8')
       }
     };
@@ -255,10 +261,20 @@ export const formatFinalReport = (report, job = null) => {
 };
 
 export default {
+  DISCORD_LIMITS,
   redactSensitive,
   safeMentions,
   formatJobCard,
   formatTaskCard,
   formatAuditReport,
-  formatFinalReport
+  formatFinalReport,
+  splitTextIntoChunks,
+  validateEmbed,
+  validateEmbeds,
+  formatDiscordPayload,
+  formatErrorPayload,
+  safeEditReply,
+  safeReply,
+  safeChannelSend,
+  safeMessageEdit
 };

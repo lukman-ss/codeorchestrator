@@ -30,6 +30,7 @@ Discord User / Guild
 - **Throttling & Rate-Limit Protection**: Live message edits throttled to 2 seconds; terminal state flushes immediately.
 - **Strict Authorization & Channel Discovery**: Guild, user, role, and project-level allowlists. Channel IDs are discovered automatically via Discord interactions and bounded by native Discord permissions; optional channel allowlist is supported. All progress routes strictly to the originating channel.
 - **Confidentiality & Redaction**: Automatically scrubs API keys, bearer tokens, private keys, RFC1918/Tailscale IPs, and deployment home directory paths.
+- **Message Length & Discord Limit Enforcement**: All outbound messages enforce the 2,000 UTF-16 code unit ceiling. Safe chunking (1,900 units), surrogate-pair safety, Markdown preservation, and sanitized `.txt` attachment fallback for large reports, audits, and outputs. Embeds and errors are strictly bounded.
 - **Mentions Suppression**: Enforces `allowedMentions: { parse: [] }` on all Discord messages.
 
 ## Quick Start

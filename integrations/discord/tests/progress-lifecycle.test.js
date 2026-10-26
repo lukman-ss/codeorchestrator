@@ -275,10 +275,12 @@ test('19. Rapid progress events are throttled to progressUpdateIntervalMs', asyn
 
 // 20. Safe graceful shutdown
 test('20. Safe graceful shutdown releases locks and stops services cleanly', async () => {
+  const testPidFile = '/tmp/test-shutdown-lock-' + Date.now() + '.pid';
   const app = new DiscordBridgeApp({
     token: '',
     apiUrl: 'http://127.0.0.1:4000',
-    dbPath: '/tmp/test-shutdown-' + Date.now() + '.db'
+    dbPath: '/tmp/test-shutdown-' + Date.now() + '.db',
+    pidFile: testPidFile
   });
 
   app.acquireLock();
@@ -288,7 +290,8 @@ test('20. Safe graceful shutdown releases locks and stops services cleanly', asy
   const app2 = new DiscordBridgeApp({
     token: '',
     apiUrl: 'http://127.0.0.1:4000',
-    dbPath: '/tmp/test-shutdown-2-' + Date.now() + '.db'
+    dbPath: '/tmp/test-shutdown-2-' + Date.now() + '.db',
+    pidFile: testPidFile
   });
 
   assert.doesNotThrow(() => app2.acquireLock());
