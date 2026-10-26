@@ -31,17 +31,34 @@ const baseTables = [
     workspace_path TEXT NOT NULL UNIQUE,
     repo_url TEXT,
     default_model TEXT DEFAULT '9router/ayce-combo',
+    is_test INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
   `CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
     opencode_session_id TEXT,
+    session_type TEXT NOT NULL DEFAULT 'project' CHECK(session_type IN ('standalone','project')),
     title TEXT,
     model TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('created','active','idle','interrupted','closed')),
+    user_id TEXT,
+    runtime_path TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK((session_type = 'standalone' AND project_id IS NULL) OR (session_type = 'project' AND project_id IS NOT NULL))
+  )`,
+  `CREATE TABLE IF NOT EXISTS session_messages (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
+    content TEXT NOT NULL,
+    opencode_session_id TEXT,
+    metadata_json TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
   `CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
@@ -69,7 +86,54 @@ const baseTables = [
   )`
 ];
 
+const ensureIndexes = () => {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_type ON sessions(session_type);
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);
+    CREATE INDEX IF NOT EXISTS idx_projects_test ON projects(is_test);
+  `);
+};
+
 export const init = () => {
+  const sessionCols = db.prepare('PRAGMA table_info(sessions)').all();
+  if (sessionCols.length > 0) {
+    const hasSessionType = sessionCols.some(c => c.name === 'session_type');
+    const projCol = sessionCols.find(c => c.name === 'project_id');
+    if (!hasSessionType || (projCol && projCol.notnull === 1)) {
+      db.pragma('foreign_keys = OFF');
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE sessions_new (
+            id TEXT PRIMARY KEY,
+            project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+            opencode_session_id TEXT,
+            session_type TEXT NOT NULL DEFAULT 'project' CHECK(session_type IN ('standalone','project')),
+            title TEXT,
+            model TEXT,
+            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('created','active','idle','interrupted','closed')),
+            user_id TEXT,
+            runtime_path TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            CHECK((session_type = 'standalone' AND project_id IS NULL) OR (session_type = 'project' AND project_id IS NOT NULL))
+          );
+          INSERT INTO sessions_new (
+            id, project_id, opencode_session_id, session_type, title, model, status, metadata_json, created_at, updated_at
+          )
+          SELECT
+            id, project_id, opencode_session_id, 'project' AS session_type, title, model, 'active' AS status, '{}' AS metadata_json, created_at, updated_at
+          FROM sessions;
+          DROP TABLE sessions;
+          ALTER TABLE sessions_new RENAME TO sessions;
+        `);
+      })();
+      db.pragma('foreign_keys = ON');
+    }
+  }
+
   const tx = db.transaction(() => {
     for (const sql of baseTables) db.exec(sql);
   });
@@ -79,6 +143,7 @@ export const init = () => {
     for (const sql of allMigrations) db.exec(sql);
   });
   txMigrations();
+  ensureIndexes();
 };
 
 export const checkpoint = () => {

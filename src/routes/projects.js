@@ -8,7 +8,9 @@ const projectSchema = z.object({
   name: z.string().min(1),
   slug: z.string().regex(/^[a-z0-9-]+$/),
   repoUrl: z.string().url().optional(),
-  defaultModel: z.string().optional()
+  defaultModel: z.string().optional(),
+  isTest: z.union([z.boolean(), z.number()]).optional(),
+  metadata: z.record(z.any()).optional()
 });
 
 const taskSchema = z.object({
@@ -17,26 +19,58 @@ const taskSchema = z.object({
   sessionId: z.string().uuid().optional()
 });
 
+const projectSessionSchema = z.object({
+  title: z.string().optional(),
+  model: z.string().optional(),
+  userId: z.string().optional(),
+  metadata: z.record(z.any()).optional()
+});
+
 export default async function projects(app) {
-  app.get('/', async () => ps.listProjects());
+  app.get('/', async (req) => ps.listProjects(req.query));
+
   app.post('/', async (req, reply) => {
     try {
       const data = projectSchema.parse(req.body);
-      reply.code(201).send(ps.createProject(data));
-    } catch (e) { reply.code(400).send({ error: e.message }); }
+      const isTestFlag = data.isTest === true || data.isTest === 1 || req.headers['x-test-mode'] === 'true' || false;
+      reply.code(201).send(ps.createProject({ ...data, isTest: isTestFlag }));
+    } catch (e) {
+      reply.code(400).send({ error: e.message });
+    }
   });
+
   app.get('/:id', async (req, reply) => {
-    try { reply.send(ps.getProject(req.params.id)); } catch (e) { reply.code(404).send({ error: e.message }); }
+    try {
+      reply.send(ps.getProject(req.params.id));
+    } catch (e) {
+      reply.code(404).send({ error: e.message });
+    }
   });
+
   app.patch('/:id', async (req, reply) => {
-    try { reply.send(ps.updateProject(req.params.id, req.body)); } catch (e) { reply.code(404).send({ error: e.message }); }
+    try {
+      reply.send(ps.updateProject(req.params.id, req.body));
+    } catch (e) {
+      reply.code(404).send({ error: e.message });
+    }
   });
+
   app.post('/import', async (req, reply) => {
-    try { reply.send(ps.importProject(req.body.slug)); } catch (e) { reply.code(400).send({ error: e.message }); }
+    try {
+      reply.send(ps.importProject(req.body.slug));
+    } catch (e) {
+      reply.code(400).send({ error: e.message });
+    }
   });
+
   app.get('/:id/tasks', async (req, reply) => {
-    try { reply.send(ts.listTasks(req.params.id)); } catch (e) { reply.code(404).send({ error: e.message }); }
+    try {
+      reply.send(ts.listTasks(req.params.id));
+    } catch (e) {
+      reply.code(404).send({ error: e.message });
+    }
   });
+
   app.post('/:id/tasks', async (req, reply) => {
     try {
       const { checkDiskSpace } = await import('../services/task-queue.js');
@@ -48,9 +82,36 @@ export default async function projects(app) {
       const task = ts.createTask(req.params.id, data);
       enqueueTask(task.id);
       reply.code(201).send({ id: task.id, status: task.status });
-    } catch (e) { reply.code(400).send({ error: e.message }); }
+    } catch (e) {
+      reply.code(400).send({ error: e.message });
+    }
   });
+
+  // List sessions associated with this project
   app.get('/:id/sessions', async (req, reply) => {
-    try { reply.send(ss.listSessions(req.params.id)); } catch (e) { reply.code(404).send({ error: e.message }); }
+    try {
+      reply.send(ss.listSessions({ projectId: req.params.id }));
+    } catch (e) {
+      reply.code(404).send({ error: e.message });
+    }
+  });
+
+  // Create session associated with this project
+  app.post('/:id/sessions', async (req, reply) => {
+    try {
+      const data = projectSessionSchema.parse(req.body || {});
+      const session = ss.createSession({
+        projectId: req.params.id,
+        type: 'project',
+        title: data.title,
+        model: data.model,
+        userId: data.userId,
+        metadata: data.metadata
+      });
+      reply.code(201).send(session);
+    } catch (e) {
+      const status = e.message.includes('not found') ? 404 : 400;
+      reply.code(status).send({ error: e.message });
+    }
   });
 }

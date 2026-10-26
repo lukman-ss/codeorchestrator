@@ -11,6 +11,7 @@ export const OPENCODE_BIN = process.env.OPENCODE_BIN || 'opencode';
 export const NINEROUTER_API_KEY = process.env.NINEROUTER_API_KEY || '';
 export const ORCHESTRATOR_ROOT = process.env.ORCHESTRATOR_ROOT || DEFAULT_ROOT;
 export const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || DEFAULT_WORKSPACE;
+export const SESSION_RUNTIME_ROOT = process.env.SESSION_RUNTIME_ROOT || resolve(ORCHESTRATOR_ROOT, 'data/session-runtime');
 export const DATABASE_PATH = process.env.DATABASE_PATH || resolve(ORCHESTRATOR_ROOT, 'data/orchestrator.db');
 
 export const DEFAULT_MODEL = process.env.DEFAULT_MODEL || '9router/ayce-combo';

@@ -101,6 +101,14 @@ export class PersistenceStore {
     ).all();
   }
 
+  getSessionExecution(id) {
+    return this.db.prepare("SELECT * FROM discord_executions WHERE id = ?").get(id);
+  }
+
+  listUserSessions(userId) {
+    return this.db.prepare("SELECT * FROM discord_executions WHERE user_id = ? AND kind = 'session' ORDER BY updated_at DESC").all(userId);
+  }
+
   close() {
     try {
       this.db.close();

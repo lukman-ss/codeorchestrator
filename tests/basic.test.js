@@ -1,35 +1,22 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execSync, spawn } from 'node:child_process';
 import http from 'node:http';
 import WebSocket from 'ws';
+import { startTestServer } from './test-helper.js';
 
-const BASE = 'http://127.0.0.1:4000';
-const TOKEN = 'test-token-123';
-
-let childServer = null;
+let serverContext;
+let BASE;
+let TOKEN;
 
 before(async () => {
-  try {
-    await fetch('/health');
-  } catch {
-    childServer = spawn('node', ['src/server.js'], {
-      env: { ...process.env, PORT: '4000', HOST: '127.0.0.1', ORCHESTRATOR_API_TOKEN: TOKEN, REQUIRE_AUTH: 'true' },
-      stdio: 'ignore'
-    });
-    for (let i = 0; i < 20; i++) {
-      await new Promise(r => setTimeout(r, 250));
-      try {
-        const res = await fetch('/health');
-        if (res.status === 200) break;
-      } catch {}
-    }
-  }
+  serverContext = await startTestServer();
+  BASE = serverContext.baseUrl;
+  TOKEN = serverContext.token;
 });
 
-after(() => {
-  if (childServer) {
-    childServer.kill('SIGTERM');
+after(async () => {
+  if (serverContext) {
+    await serverContext.cleanup();
   }
 });
 

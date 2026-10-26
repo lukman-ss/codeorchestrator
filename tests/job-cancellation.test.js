@@ -1,57 +1,20 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import http from 'node:http';
+import { startTestServer } from './test-helper.js';
 
-const BASE = 'http://127.0.0.1:4000';
-const TOKEN = 'test-token-123';
-
-let childServer = null;
+let serverContext;
+let req;
 
 before(async () => {
-  try {
-    await req('/health');
-  } catch {
-    childServer = spawn('node', ['src/server.js'], {
-      env: { ...process.env, PORT: '4000', HOST: '127.0.0.1', ORCHESTRATOR_API_TOKEN: TOKEN, REQUIRE_AUTH: 'true' },
-      stdio: 'ignore'
-    });
-    for (let i = 0; i < 20; i++) {
-      await new Promise(r => setTimeout(r, 250));
-      try {
-        const res = await req('/health');
-        if (res.status === 200) break;
-      } catch {}
-    }
-  }
+  serverContext = await startTestServer();
+  req = serverContext.req;
 });
 
-after(() => {
-  if (childServer) {
-    try { childServer.kill('SIGTERM'); } catch {}
+after(async () => {
+  if (serverContext) {
+    await serverContext.cleanup();
   }
 });
-
-const req = (path, method = 'GET', body = null) => {
-  return new Promise((resolve, reject) => {
-    const url = new URL(path, BASE);
-    const headers = { 'Content-Type': 'application/json' };
-    if (TOKEN) headers['Authorization'] = `Bearer ${TOKEN}`;
-    const opts = { method, headers };
-    const r = http.request(url, opts, (res) => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        let parsed = null;
-        try { parsed = JSON.parse(data); } catch { parsed = data; }
-        resolve({ status: res.statusCode, body: parsed });
-      });
-    });
-    r.on('error', reject);
-    if (body) r.write(JSON.stringify(body));
-    r.end();
-  });
-};
 
 test('Job cancellation extension tests', async () => {
   // 1. Create project

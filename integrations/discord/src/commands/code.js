@@ -28,12 +28,104 @@ export const data = new SlashCommandBuilder()
   .addSubcommand(sub =>
     sub
       .setName('projects')
-      .setDescription('List available projects accessible to you')
+      .setDescription('List registered and authorized coding workspaces')
+      .addIntegerOption(opt =>
+        opt
+          .setName('page')
+          .setDescription('Page number')
+          .setRequired(false)
+          .setMinValue(1)
+      )
+  )
+  .addSubcommand(sub =>
+    sub
+      .setName('sessions')
+      .setDescription('List conversational sessions (standalone and project-linked)')
+      .addStringOption(opt =>
+        opt
+          .setName('project')
+          .setDescription('Filter sessions by target project')
+          .setRequired(false)
+          .setAutocomplete(true)
+      )
+      .addIntegerOption(opt =>
+        opt
+          .setName('page')
+          .setDescription('Page number')
+          .setRequired(false)
+          .setMinValue(1)
+      )
+  )
+  .addSubcommand(sub =>
+    sub
+      .setName('chat')
+      .setDescription('Start or continue a standalone conversation (no project required)')
+      .addStringOption(opt =>
+        opt
+          .setName('prompt')
+          .setDescription('Your question or message')
+          .setRequired(true)
+      )
+      .addStringOption(opt =>
+        opt
+          .setName('session')
+          .setDescription('Existing session ID to continue')
+          .setRequired(false)
+          .setAutocomplete(true)
+      )
+      .addStringOption(opt =>
+        opt
+          .setName('model')
+          .setDescription('Model override')
+          .setRequired(false)
+      )
+  )
+  .addSubcommand(sub =>
+    sub
+      .setName('session')
+      .setDescription('Create a new session (standalone or project-linked)')
+      .addStringOption(opt =>
+        opt
+          .setName('title')
+          .setDescription('Session title or topic')
+          .setRequired(true)
+      )
+      .addStringOption(opt =>
+        opt
+          .setName('project')
+          .setDescription('Optional project to link workspace context')
+          .setRequired(false)
+          .setAutocomplete(true)
+      )
+      .addStringOption(opt =>
+        opt
+          .setName('model')
+          .setDescription('Model override')
+          .setRequired(false)
+      )
+  )
+  .addSubcommand(sub =>
+    sub
+      .setName('resume')
+      .setDescription('Continue an existing session with follow-up message')
+      .addStringOption(opt =>
+        opt
+          .setName('session')
+          .setDescription('Session ID to resume')
+          .setRequired(true)
+          .setAutocomplete(true)
+      )
+      .addStringOption(opt =>
+        opt
+          .setName('prompt')
+          .setDescription('Follow-up instructions or question')
+          .setRequired(true)
+      )
   )
   .addSubcommand(sub =>
     sub
       .setName('run')
-      .setDescription('Submit a simple coding task')
+      .setDescription('Submit a simple coding task to a project workspace')
       .addStringOption(opt =>
         opt
           .setName('project')
@@ -51,7 +143,7 @@ export const data = new SlashCommandBuilder()
   .addSubcommand(sub =>
     sub
       .setName('job')
-      .setDescription('Submit a multi-agent coding job')
+      .setDescription('Submit a multi-agent coding job to a project workspace')
       .addStringOption(opt =>
         opt
           .setName('project')
@@ -125,31 +217,29 @@ export const data = new SlashCommandBuilder()
   .addSubcommand(sub =>
     sub
       .setName('help')
-      .setDescription('Display available commands and usage guide')
+      .setDescription('Display available commands and domain architecture guide')
   );
 
 export async function handleAutocomplete(interaction) {
   try {
     const focusedOption = interaction.options.getFocused(true);
+    const userId = interaction.user?.id || interaction.userId;
+    const memberRoles = interaction.member?.roles?.cache
+      ? Array.from(interaction.member.roles.cache.keys())
+      : Array.isArray(interaction.member?.roles)
+      ? interaction.member.roles
+      : [];
+
     if (focusedOption.name === 'project') {
       const authCheck = auth.validateInteraction(interaction);
-      if (!authCheck.allowed) {
-        return interaction.respond([]);
-      }
+      if (!authCheck.allowed) return interaction.respond([]);
 
-      const userId = interaction.user?.id || interaction.userId;
-      const memberRoles = interaction.member?.roles?.cache
-        ? Array.from(interaction.member.roles.cache.keys())
-        : Array.isArray(interaction.member?.roles)
-        ? interaction.member.roles
-        : [];
-
-      const projects = await apiClient.fetchProjects().catch(() => []);
+      const projects = await apiClient.fetchProjects({ includeTest: false }).catch(() => []);
       const query = (focusedOption.value || '').toLowerCase();
 
-      const allowedProjects = projects.filter(p =>
-        auth.isProjectAllowedForUser(userId, memberRoles, p)
-      );
+      const allowedProjects = projects
+        .filter(p => !p.is_test)
+        .filter(p => auth.isProjectAllowedForUser(userId, memberRoles, p));
 
       const filtered = allowedProjects.filter(p =>
         p.name.toLowerCase().includes(query) ||
@@ -162,7 +252,33 @@ export async function handleAutocomplete(interaction) {
         value: p.id
       }));
 
-      await interaction.respond(choices);
+      return interaction.respond(choices);
+    }
+
+    if (focusedOption.name === 'session') {
+      const sessions = await apiClient.fetchSessions({ limit: 50 }).catch(() => []);
+      const query = (focusedOption.value || '').toLowerCase();
+
+      const allowedSessions = sessions.filter(s =>
+        auth.isSessionAllowedForUser(userId, memberRoles, s)
+      );
+
+      const filtered = allowedSessions.filter(s =>
+        (s.title && s.title.toLowerCase().includes(query)) ||
+        s.id.toLowerCase().includes(query) ||
+        (s.session_type && s.session_type.toLowerCase().includes(query))
+      );
+
+      const choices = filtered.slice(0, 25).map(s => {
+        const typeTag = s.session_type === 'standalone' ? '[Standalone]' : '[Project]';
+        const title = s.title || 'Untitled Session';
+        return {
+          name: `${typeTag} ${title} (${s.id.slice(0, 8)})`.slice(0, 100),
+          value: s.id
+        };
+      });
+
+      return interaction.respond(choices);
     }
   } catch {
     try {
@@ -174,7 +290,6 @@ export async function handleAutocomplete(interaction) {
 export async function execute(interaction, eventListener = null) {
   const subcommand = interaction.options.getSubcommand();
 
-  // Security Gate
   const authCheck = auth.validateInteraction(interaction, subcommand);
   if (!authCheck.allowed) {
     return safeReply(interaction, {
@@ -184,7 +299,6 @@ export async function execute(interaction, eventListener = null) {
     }, { type: 'auth_denied' });
   }
 
-  // Acknowledge promptly (defer reply)
   await interaction.deferReply();
 
   const userId = interaction.user?.id || interaction.userId;
@@ -198,6 +312,14 @@ export async function execute(interaction, eventListener = null) {
     switch (subcommand) {
       case 'projects':
         return await handleProjects(interaction, userId, memberRoles);
+      case 'sessions':
+        return await handleSessions(interaction, userId, memberRoles);
+      case 'chat':
+        return await handleChat(interaction, userId, memberRoles);
+      case 'session':
+        return await handleSession(interaction, userId, memberRoles);
+      case 'resume':
+        return await handleResume(interaction, userId, memberRoles);
       case 'run':
         return await handleRun(interaction, userId, memberRoles, eventListener);
       case 'job':
@@ -224,54 +346,52 @@ export async function execute(interaction, eventListener = null) {
 }
 
 async function handleProjects(interaction, userId, memberRoles) {
-  const projects = await apiClient.fetchProjects();
-  const accessible = projects.filter(p => auth.isProjectAllowedForUser(userId, memberRoles, p));
+  const page = interaction.options.getInteger('page') || 1;
+  const pageSize = 5;
+
+  const projects = await apiClient.fetchProjects({ includeTest: false });
+  const accessible = projects
+    .filter(p => !p.is_test)
+    .filter(p => auth.isProjectAllowedForUser(userId, memberRoles, p));
 
   if (accessible.length === 0) {
     return safeEditReply(interaction, {
-      content: 'No projects found or you lack permission to view available projects.',
+      content: 'No registered coding projects found or you lack permission to view available projects.',
       allowedMentions: safeMentions
     }, { type: 'projects' });
   }
 
+  const totalPages = Math.ceil(accessible.length / pageSize);
+  const currentPage = Math.min(Math.max(1, page), totalPages);
+  const startIndex = (currentPage - 1) * pageSize;
+  const pageProjects = accessible.slice(startIndex, startIndex + pageSize);
+
   const lines = [
     '```',
-    'CodeOrchestrator — Accessible Projects',
+    `CodeOrchestrator — Projects (Page ${currentPage} of ${totalPages})`,
     ''
   ];
 
-  for (const p of accessible) {
-    lines.push(`• Name:   ${p.name}`);
-    lines.push(`  ID:     ${p.id}`);
-    lines.push(`  Slug:   ${p.slug}`);
-    lines.push(`  Model:  ${p.default_model || 'default'}`);
+  for (const p of pageProjects) {
+    lines.push(`• Name:      ${p.name}`);
+    lines.push(`  ID:        ${p.id}`);
+    lines.push(`  Slug:      ${p.slug}`);
+    lines.push(`  Workspace: ${p.workspace_path}`);
+    lines.push(`  Model:     ${p.default_model || 'default'}`);
     lines.push('');
   }
   lines.push('```');
 
+  if (totalPages > 1) {
+    lines.push(`_Use \`/code projects page:${currentPage < totalPages ? currentPage + 1 : 1}\` to view more._`);
+  }
+
   const fullText = redactSensitive(lines.join('\n'));
 
-  // If projects list is oversized, create concise summary + txt attachment
   if (fullText.length > 1800) {
-    const summaryLines = [
-      '```',
-      `CodeOrchestrator — Accessible Projects (${accessible.length} projects)`,
-      ''
-    ];
-    for (const p of accessible.slice(0, 5)) {
-      summaryLines.push(`• ${p.name} (${p.slug})`);
-    }
-    if (accessible.length > 5) {
-      summaryLines.push(`... and ${accessible.length - 5} more projects`);
-    }
-    summaryLines.push('```');
-    summaryLines.push('_Full project list attached below._');
-
     return safeEditReply(interaction, {
-      content: summaryLines.join('\n'),
-      files: [
-        new AttachmentBuilder(Buffer.from(fullText, 'utf8'), { name: 'projects.txt' })
-      ],
+      content: `Projects list (Page ${currentPage} of ${totalPages}) attached below:`,
+      files: [new AttachmentBuilder(Buffer.from(fullText, 'utf8'), { name: 'projects.txt' })],
       allowedMentions: safeMentions
     }, { type: 'projects' });
   }
@@ -280,6 +400,270 @@ async function handleProjects(interaction, userId, memberRoles) {
     content: fullText,
     allowedMentions: safeMentions
   }, { type: 'projects' });
+}
+
+async function handleSessions(interaction, userId, memberRoles) {
+  const projectInput = interaction.options.getString('project');
+  const page = interaction.options.getInteger('page') || 1;
+  const pageSize = 5;
+
+  let resolvedProject = null;
+  let sessions = [];
+
+  if (projectInput) {
+    resolvedProject = await apiClient.resolveProject(projectInput);
+    if (!resolvedProject) {
+      return safeEditReply(interaction, {
+        content: `❌ Project \`${projectInput}\` not found in CodeOrchestrator.`,
+        allowedMentions: safeMentions
+      }, { type: 'sessions_error' });
+    }
+    if (!auth.isProjectAllowedForUser(userId, memberRoles, resolvedProject)) {
+      return safeEditReply(interaction, {
+        content: `❌ Access Denied: You do not have permission to view sessions for project \`${resolvedProject.slug}\`.`,
+        allowedMentions: safeMentions
+      }, { type: 'auth_denied' });
+    }
+    sessions = await apiClient.fetchSessions({ projectId: resolvedProject.id, limit: 100 });
+  } else {
+    sessions = await apiClient.fetchSessions({ limit: 100 });
+  }
+
+  const accessible = sessions.filter(s => auth.isSessionAllowedForUser(userId, memberRoles, s));
+
+  if (accessible.length === 0) {
+    const scopeMsg = resolvedProject ? `under project \`${resolvedProject.slug}\`` : '';
+    return safeEditReply(interaction, {
+      content: `No sessions found ${scopeMsg}. Use \`/code chat\` or \`/code session\` to start a conversation.`,
+      allowedMentions: safeMentions
+    }, { type: 'sessions' });
+  }
+
+  const totalPages = Math.ceil(accessible.length / pageSize);
+  const currentPage = Math.min(Math.max(1, page), totalPages);
+  const startIndex = (currentPage - 1) * pageSize;
+  const pageSessions = accessible.slice(startIndex, startIndex + pageSize);
+
+  const header = resolvedProject
+    ? `CodeOrchestrator — Sessions for ${resolvedProject.name} (Page ${currentPage} of ${totalPages})`
+    : `CodeOrchestrator — Sessions (Page ${currentPage} of ${totalPages})`;
+
+  const lines = ['```', header, ''];
+
+  for (const s of pageSessions) {
+    const isStandalone = s.session_type === 'standalone' || !s.project_id;
+    const typeLabel = isStandalone ? 'Standalone' : `Project (${s.project_id.slice(0, 8)})`;
+    lines.push(`• Title:   ${s.title || 'Untitled Session'}`);
+    lines.push(`  ID:      ${s.id}`);
+    lines.push(`  Type:    ${typeLabel}`);
+    lines.push(`  Model:   ${s.model || 'default'}`);
+    lines.push(`  Status:  ${s.status || 'idle'}`);
+    lines.push(`  Updated: ${s.updated_at || s.created_at}`);
+    lines.push('');
+  }
+  lines.push('```');
+
+  if (totalPages > 1) {
+    lines.push(`_Use \`/code sessions page:${currentPage < totalPages ? currentPage + 1 : 1}\` to view more._`);
+  }
+
+  const fullText = redactSensitive(lines.join('\n'));
+
+  if (fullText.length > 1800) {
+    return safeEditReply(interaction, {
+      content: `Sessions list (Page ${currentPage} of ${totalPages}) attached below:`,
+      files: [new AttachmentBuilder(Buffer.from(fullText, 'utf8'), { name: 'sessions.txt' })],
+      allowedMentions: safeMentions
+    }, { type: 'sessions' });
+  }
+
+  return safeEditReply(interaction, {
+    content: fullText,
+    allowedMentions: safeMentions
+  }, { type: 'sessions' });
+}
+
+async function handleChat(interaction, userId, memberRoles) {
+  const prompt = interaction.options.getString('prompt', true);
+  const sessionInput = interaction.options.getString('session');
+  const modelOverride = interaction.options.getString('model');
+
+  let session = null;
+
+  if (sessionInput) {
+    session = await apiClient.resolveSession(sessionInput);
+    if (!session) {
+      return safeEditReply(interaction, {
+        content: `❌ Session \`${sessionInput}\` not found.`,
+        allowedMentions: safeMentions
+      }, { type: 'chat_error' });
+    }
+    if (!auth.isSessionAllowedForUser(userId, memberRoles, session)) {
+      return safeEditReply(interaction, {
+        content: `❌ Access Denied: You do not have permission to access private session \`${session.id}\`.`,
+        allowedMentions: safeMentions
+      }, { type: 'auth_denied' });
+    }
+  } else {
+    // Create new standalone session
+    session = await apiClient.createSession({
+      title: prompt.slice(0, 50).trim(),
+      type: 'standalone',
+      model: modelOverride,
+      userId
+    });
+  }
+
+  const result = await apiClient.sendSessionMessage(session.id, {
+    prompt,
+    model: modelOverride,
+    userId
+  });
+
+  const replyText = result.response || '_(No response returned)_';
+  const typeLabel = session.session_type === 'standalone' ? 'Standalone' : 'Project-Linked';
+
+  const header = [
+    `**Session:** ${session.title || 'Conversation'}`,
+    `**Type:** ${typeLabel}`,
+    `**ID:** \`${session.id}\``,
+    '',
+    '**Response:**'
+  ].join('\n');
+
+  const footer = `\n\n_Continue with:_ \`/code resume session:${session.id} prompt:<text>\``;
+  const fullContent = redactSensitive(`${header}\n${replyText}${footer}`);
+
+  const reply = await safeEditReply(interaction, {
+    content: fullContent,
+    allowedMentions: safeMentions
+  }, { type: 'chat_response' });
+
+  persistence.saveExecution({
+    id: session.id,
+    kind: 'session',
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    userId,
+    messageId: reply?.id || 'pending',
+    projectId: session.project_id || null,
+    promptSnippet: prompt.slice(0, 100),
+    status: result.status || 'idle'
+  });
+}
+
+async function handleSession(interaction, userId, memberRoles) {
+  const title = interaction.options.getString('title', true);
+  const projectInput = interaction.options.getString('project');
+  const model = interaction.options.getString('model');
+
+  if (projectInput) {
+    const project = await apiClient.resolveProject(projectInput);
+    if (!project) {
+      return safeEditReply(interaction, {
+        content: `❌ Project \`${projectInput}\` not found in CodeOrchestrator.`,
+        allowedMentions: safeMentions
+      }, { type: 'session_error' });
+    }
+    if (!auth.isProjectAllowedForUser(userId, memberRoles, project)) {
+      return safeEditReply(interaction, {
+        content: `❌ Access Denied: You do not have permission to create sessions on project \`${project.slug}\`.`,
+        allowedMentions: safeMentions
+      }, { type: 'auth_denied' });
+    }
+
+    const session = await apiClient.createProjectSession(project.id, {
+      title,
+      model,
+      userId
+    });
+
+    const lines = [
+      '✅ **Project Session Created**',
+      `• **Title:** ${session.title}`,
+      `• **ID:** \`${session.id}\``,
+      `• **Type:** Project-Linked`,
+      `• **Project:** \`${project.name}\` (\`${project.slug}\`)`,
+      `• **Workspace:** \`${project.workspace_path}\``,
+      `• **Model:** \`${session.model || 'default'}\``,
+      `• **Status:** \`${session.status}\``,
+      '',
+      `_Start conversation with:_ \`/code resume session:${session.id} prompt:<text>\``
+    ];
+
+    return safeEditReply(interaction, {
+      content: lines.join('\n'),
+      allowedMentions: safeMentions
+    }, { type: 'session_created' });
+  }
+
+  // Standalone session
+  const session = await apiClient.createSession({
+    title,
+    type: 'standalone',
+    model,
+    userId
+  });
+
+  const lines = [
+    '✅ **Standalone Session Created**',
+    `• **Title:** ${session.title}`,
+    `• **ID:** \`${session.id}\``,
+    `• **Type:** Standalone (Independent OpenCode Conversation)`,
+    `• **Model:** \`${session.model || 'default'}\``,
+    `• **Status:** \`${session.status}\``,
+    '',
+    `_Start conversation with:_ \`/code resume session:${session.id} prompt:<text>\``
+  ];
+
+  return safeEditReply(interaction, {
+    content: lines.join('\n'),
+    allowedMentions: safeMentions
+  }, { type: 'session_created' });
+}
+
+async function handleResume(interaction, userId, memberRoles) {
+  const sessionInput = interaction.options.getString('session', true);
+  const prompt = interaction.options.getString('prompt', true);
+
+  const session = await apiClient.resolveSession(sessionInput);
+  if (!session) {
+    return safeEditReply(interaction, {
+      content: `❌ Session \`${sessionInput}\` not found.`,
+      allowedMentions: safeMentions
+    }, { type: 'resume_error' });
+  }
+
+  if (!auth.isSessionAllowedForUser(userId, memberRoles, session)) {
+    return safeEditReply(interaction, {
+      content: `❌ Access Denied: You do not have permission to access session \`${session.id}\`.`,
+      allowedMentions: safeMentions
+    }, { type: 'auth_denied' });
+  }
+
+  const result = await apiClient.sendSessionMessage(session.id, {
+    prompt,
+    userId
+  });
+
+  const replyText = result.response || '_(No response returned)_';
+  const typeLabel = session.session_type === 'standalone' ? 'Standalone' : 'Project-Linked';
+
+  const header = [
+    `**Session:** ${session.title || 'Conversation'}`,
+    `**Type:** ${typeLabel}`,
+    `**ID:** \`${session.id}\``,
+    '',
+    '**Response:**'
+  ].join('\n');
+
+  const footer = `\n\n_Continue with:_ \`/code resume session:${session.id} prompt:<text>\``;
+  const fullContent = redactSensitive(`${header}\n${replyText}${footer}`);
+
+  return safeEditReply(interaction, {
+    content: fullContent,
+    allowedMentions: safeMentions
+  }, { type: 'resume_response' });
 }
 
 async function handleRun(interaction, userId, memberRoles, eventListener) {
@@ -479,7 +863,6 @@ async function handleAudit(interaction, userId, memberRoles) {
     }, { type: 'auth_denied' });
   }
 
-  // 1. Check if ID is a subtask
   const audits = await apiClient.getSubtaskAudits(id).catch(() => null);
   if (audits && audits.length > 0) {
     const formatted = formatAuditReport(audits, id);
@@ -495,7 +878,6 @@ async function handleAudit(interaction, userId, memberRoles) {
     return safeEditReply(interaction, replyPayload, { type: 'audit' });
   }
 
-  // 2. Check if ID is a job; if so, fetch subtasks and check audits
   const subtasks = await apiClient.getJobSubtasks(id).catch(() => null);
   if (subtasks && subtasks.length > 0) {
     const allAudits = [];
@@ -639,26 +1021,46 @@ async function handleHelp(interaction) {
   const helpText = [
     '**CodeOrchestrator Discord Commands**',
     '',
-    '`/code projects`',
-    'List all available and authorized projects.',
+    '**Core Concepts:**',
+    '• **Project**: A persistent coding workspace (e.g. `/workspace/bengkelly`). Targets git repositories.',
+    '• **Standalone Session**: Persistent OpenCode conversation for Q&A, research, or debugging advice. Independent; no project required.',
+    '• **Project Session**: Persistent OpenCode conversation attached to a specific coding workspace.',
+    '• **Task**: An individual queued execution request on a project.',
+    '• **Job**: Multi-agent workflow with requirement breakdown, workers, and independent audits.',
+    '',
+    '**Commands:**',
+    '`/code chat prompt:<text> [session:<id>] [model:<model>]`',
+    'Start or continue a standalone conversation without selecting a project.',
+    '',
+    '`/code session title:<text> [project:<name>] [model:<model>]`',
+    'Create a standalone session or project-linked session.',
+    '',
+    '`/code resume session:<id> prompt:<text>`',
+    'Continue an existing OpenCode session with follow-up message.',
+    '',
+    '`/code sessions [project:<name>] [page:<num>]`',
+    'List authorized sessions (standalone and project-linked).',
+    '',
+    '`/code projects [page:<num>]`',
+    'List accessible coding workspaces.',
     '',
     '`/code run project:<name> prompt:<text>`',
-    'Submit a single coding task to the execution queue.',
+    'Submit a single coding task to a project workspace.',
     '',
     '`/code job project:<name> [prompt:<text>] [attachment:<file>]`',
-    'Submit a multi-agent coding job with automated workers, auditors, and integration. Supports `.txt` and `.md` files.',
+    'Submit a multi-agent job to a project workspace.',
     '',
     '`/code status id:<id>`',
-    'Retrieve current execution status and active agent counts.',
+    'Check task or multi-agent job status.',
     '',
     '`/code audit id:<id>`',
-    'Retrieve independent audit findings, verdicts, and verification evidence.',
+    'View independent auditor reports.',
     '',
     '`/code report id:<id>`',
-    'View the final execution report and test results.',
+    'View final execution report and test results.',
     '',
     '`/code cancel id:<id> [confirm:True]`',
-    'Cancel an active task or job (requires explicit confirmation).'
+    'Cancel an active task or job.'
   ].join('\n');
 
   return safeEditReply(interaction, {

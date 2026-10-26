@@ -5,39 +5,116 @@ All requests require authentication via the `Authorization: Bearer <ORCHESTRATOR
 ## System Probes
 
 ### `GET /health`
-
 Returns service health, process PID, running task counters, and disk metrics. Does not require authentication.
 
 ```bash
 curl http://127.0.0.1:4000/health
 ```
 
-**Response (200 OK)**:
-```json
-{
-  "status": "ok",
-  "pid": 41019,
-  "globalRunning": 0,
-  "queueDepth": 0,
-  "diskFreeMB": 24326,
-  "diskUsagePercent": 16,
-  "diskThresholdMB": 2048
-}
-```
-
 ### `GET /ready`
-
 Readiness probe verifying SQLite connectivity and disk space availability. Does not require authentication.
 
 ```bash
 curl http://127.0.0.1:4000/ready
 ```
 
+---
+
+## Sessions API (`/sessions`)
+
+### `GET /sessions`
+Lists interactive sessions. Supports filtering by query parameters.
+
+| Query Param | Type | Description |
+|---|---|---|
+| `type` | string | Filter by `'standalone'` or `'project'`. |
+| `projectId` | string | Filter sessions belonging to a project UUID. |
+| `userId` | string | Filter by user identifier. |
+| `limit` | integer | Number of items to return (default 50). |
+| `offset` | integer | Pagination offset (default 0). |
+
+```bash
+# List standalone sessions
+curl "http://127.0.0.1:4000/sessions?type=standalone" -H "Authorization: Bearer <TOKEN>"
+```
+
+### `POST /sessions`
+Creates an interactive session.
+
+```bash
+# Create Standalone Session (no workspace or project created)
+curl -X POST http://127.0.0.1:4000/sessions \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "General Research Session",
+    "model": "9router/ayce-combo",
+    "metadata": { "environment": "dev" }
+  }'
+```
+
+```bash
+# Create Project-Linked Session
+curl -X POST http://127.0.0.1:4000/sessions \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "projectId": "2b31f71a-6df6-45ef-b14d-6161882d2bb4",
+    "title": "Feature Discussion"
+  }'
+```
+
+### `GET /sessions/:id`
+Retrieves detailed session state, type, runtime path, and parsed metadata.
+
+```bash
+curl http://127.0.0.1:4000/sessions/<SESSION_ID> -H "Authorization: Bearer <TOKEN>"
+```
+
+### `PATCH /sessions/:id`
+Updates title, model, or status (`'created'`, `'active'`, `'idle'`, `'interrupted'`, `'closed'`). Rejects attempts to rebind across workspace boundaries (`projectId` / `session_type` cannot be changed).
+
+```bash
+curl -X PATCH http://127.0.0.1:4000/sessions/<SESSION_ID> \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{ "title": "Updated Title", "status": "idle" }'
+```
+
+### `DELETE /sessions/:id`
+Deletes a session and cascades deletion of all associated messages.
+
+```bash
+curl -X DELETE http://127.0.0.1:4000/sessions/<SESSION_ID> -H "Authorization: Bearer <TOKEN>"
+```
+
+### `POST /sessions/:id/messages`
+Executes an interactive turn with real OpenCode continuation and per-session concurrency mutex lock.
+
+```bash
+curl -X POST http://127.0.0.1:4000/sessions/<SESSION_ID>/messages \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Explain the project architecture and summarize key points."
+  }'
+```
+
 **Response (200 OK)**:
 ```json
 {
-  "status": "ready"
+  "sessionId": "a3df8394-6721-40aa-b426-2db05cf32d93",
+  "opencodeSessionId": "ses_e889d19cfffeFu3gzCFNMJrwiQ",
+  "response": "The project uses Fastify, SQLite WAL, and isolated OpenCode runners...",
+  "status": "idle"
 }
+```
+
+### `GET /sessions/:id/messages`
+Retrieves chronological message history for the session.
+
+```bash
+curl http://127.0.0.1:4000/sessions/<SESSION_ID>/messages -H "Authorization: Bearer <TOKEN>"
 ```
 
 ---
@@ -45,239 +122,75 @@ curl http://127.0.0.1:4000/ready
 ## Projects API (`/projects`)
 
 ### `GET /projects`
+Lists registered projects. Defaults to operational projects (`is_test = 0`).
 
-Lists all registered projects ordered by creation time descending.
+```bash
+# Operational projects
+curl http://127.0.0.1:4000/projects -H "Authorization: Bearer <TOKEN>"
 
-**Response (200 OK)**:
-```json
-[
-  {
-    "id": "2b31f71a-6df6-45ef-b14d-6161882d2bb4",
-    "name": "Backend Service",
-    "slug": "backend-service",
-    "workspace_path": "/path/to/workspace/backend-service",
-    "repo_url": null,
-    "default_model": "9router/ayce-combo",
-    "created_at": "2026-10-25 04:00:00",
-    "updated_at": "2026-10-25 04:00:00"
-  }
-]
+# Include test projects
+curl "http://127.0.0.1:4000/projects?includeTest=true" -H "Authorization: Bearer <TOKEN>"
 ```
 
 ### `POST /projects`
+Creates a project workspace directory under `WORKSPACE_ROOT`.
 
-Creates a new project.
-
-**Request Body**:
-```json
-{
-  "name": "Frontend Web App",
-  "slug": "frontend-webapp",
-  "repoUrl": "https://github.com/example/frontend.git",
-  "defaultModel": "9router/ayce-combo"
-}
+```bash
+curl -X POST http://127.0.0.1:4000/projects \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Backend Service",
+    "slug": "backend-service",
+    "defaultModel": "9router/ayce-combo",
+    "isTest": false
+  }'
 ```
 
-**Response (201 Created)**: Returns the created project object.
+### `POST /projects/:id/sessions`
+Creates an interactive session scoped to the project's workspace.
 
-### `GET /projects/:id`
-
-Retrieves a single project by ID. Returns `404 Not Found` if missing.
-
-### `PATCH /projects/:id`
-
-Updates editable project fields (`name`, `defaultModel`).
-
-**Request Body**:
-```json
-{
-  "name": "New Name",
-  "defaultModel": "9router/claude-3-5-sonnet"
-}
+```bash
+curl -X POST http://127.0.0.1:4000/projects/<PROJECT_ID>/sessions \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{ "title": "Refactoring Session" }'
 ```
-
-### `POST /projects/import`
-
-Registers an existing directory under `WORKSPACE_ROOT` without cloning.
-
-**Request Body**:
-```json
-{
-  "slug": "existing-directory-name"
-}
-```
-
-### `GET /projects/:id/tasks`
-
-Lists all tasks belonging to the specified project.
-
-### `POST /projects/:id/tasks`
-
-Submits a single coding task to the execution queue for the project.
-
-**Request Body**:
-```json
-{
-  "prompt": "Create an express HTTP server in index.js with /health endpoint",
-  "model": "9router/ayce-combo",
-  "sessionId": "optional-uuid"
-}
-```
-
-**Response (201 Created)**:
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "queued"
-}
-```
-
-*Note*: Returns `507 Insufficient Storage` if disk free space is below `MIN_FREE_DISK_MB`.
 
 ### `GET /projects/:id/sessions`
+Lists all sessions scoped to the specified project.
 
-Lists all OpenCode sessions associated with the project.
+```bash
+curl http://127.0.0.1:4000/projects/<PROJECT_ID>/sessions -H "Authorization: Bearer <TOKEN>"
+```
 
 ---
 
 ## Tasks API (`/tasks`)
 
-### `GET /tasks`
+### `POST /projects/:id/tasks`
+Enqueues a single coding execution task in the project workspace.
 
-Lists all tasks across all projects.
+```bash
+curl -X POST http://127.0.0.1:4000/projects/<PROJECT_ID>/tasks \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Fix unit test failures in tests/auth.test.js",
+    "model": "9router/ayce-combo"
+  }'
+```
 
 ### `GET /tasks/:id`
+Retrieves task execution state and exit status.
 
-Retrieves details and execution status of a specific task.
-
-**Response (200 OK)**:
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "project_id": "2b31f71a-6df6-45ef-b14d-6161882d2bb4",
-  "session_id": null,
-  "prompt": "Create an express HTTP server",
-  "model": "9router/ayce-combo",
-  "status": "completed",
-  "pid": 42010,
-  "exit_code": 0,
-  "error": null,
-  "created_at": "2026-10-25 04:10:00",
-  "started_at": "2026-10-25 04:10:01",
-  "finished_at": "2026-10-25 04:10:15",
-  "updated_at": "2026-10-25 04:10:15"
-}
+```bash
+curl http://127.0.0.1:4000/tasks/<TASK_ID> -H "Authorization: Bearer <TOKEN>"
 ```
 
-### `GET /tasks/:id/events`
+### `POST /tasks/:id/cancel`
+Cancels an active or queued task.
 
-Fetches historical task event records for replay.
-
-**Query Parameters**:
-- `afterSequence` (integer, optional): Sequence number after which to retrieve events. Defaults to `0`.
-
-**Response (200 OK)**:
-```json
-[
-  {
-    "id": 1,
-    "task_id": "550e8400-e29b-41d4-a716-446655440000",
-    "sequence": 1,
-    "type": "task.queued",
-    "payload_json": "{}",
-    "created_at": "2026-10-25 04:10:00"
-  }
-]
+```bash
+curl -X POST http://127.0.0.1:4000/tasks/<TASK_ID>/cancel -H "Authorization: Bearer <TOKEN>"
 ```
-
-### `POST /tasks/:taskId/cancel`
-
-Cancels a queued or currently executing task. If running, issues `SIGTERM`, waits for grace period, then `SIGKILL`.
-
-**Response (200 OK)**:
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "cancelled"
-}
-```
-
----
-
-## Sessions API (`/sessions`)
-
-### `GET /sessions/:id`
-
-Retrieves session information.
-
-### `PATCH /sessions/:id`
-
-Updates session metadata (`title`, `model`).
-
-### `GET /sessions/:id/tasks`
-
-Retrieves all tasks associated with the session.
-
----
-
-## Jobs API (`/jobs` & `/subtasks`)
-
-### `POST /jobs`
-
-Creates and schedules a multi-agent job decomposed into requirements and subtasks.
-
-**Request Body**:
-```json
-{
-  "project_id": "2b31f71a-6df6-45ef-b14d-6161882d2bb4",
-  "prompt": "# Project Plan\n1. Implement auth middleware with JWT support\n   Acceptance criteria: must validate Bearer token\n2. Add SQLite schema for users table\n   Acceptance criteria: id, email, password_hash columns"
-}
-```
-
-**Response (201 Created)**:
-```json
-{
-  "id": "job-uuid-1234",
-  "subtaskId": "subtask-uuid-5678"
-}
-```
-
-### `GET /jobs/:id`
-
-Retrieves job progress, verification percentage, and final audit verdict.
-
-### `GET /jobs/:id/subtasks`
-
-Lists all subtasks, dependency edges, status, and assigned roles.
-
-### `GET /jobs/:id/agents`
-
-Returns current agent capacity and active execution slots for the job.
-
-### `GET /jobs/:id/audits`
-
-Returns audit reports and acceptance verdicts for all subtasks in the job.
-
-### `GET /jobs/:id/integrations`
-
-Returns merge verdicts and integration test results for the job.
-
-### `GET /jobs/:id/execution-graph`
-
-Returns the dependency graph and execution timeline.
-
-### `GET /subtasks/:id/audit`
-
-Retrieves detailed audit records, tests executed, and evidence findings for a single subtask.
-
-### `GET /subtasks/:id/executions`
-
-Lists all agent executions (worker, auditor, repair) recorded for the subtask.
-
-### `POST /subtasks/:id/retry`
-
-Schedules an immediate retry execution for a failed subtask.
-
-### `POST /subtasks/:id/reaudit`
-
-Schedules an immediate re-audit verification for a completed subtask implementation.

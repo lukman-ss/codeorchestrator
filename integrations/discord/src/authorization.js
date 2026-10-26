@@ -119,6 +119,27 @@ export class AuthorizationService {
     return this.config.allowedProjects.includes(projectId) || this.config.allowedProjects.includes(projectSlug);
   }
 
+  isSessionAllowedForUser(userId, memberRoles = [], session) {
+    if (!session) return false;
+    if (!this.isUserAllowed(userId, memberRoles)) return false;
+
+    const isAdmin =
+      (this.config.adminUserIds && this.config.adminUserIds.includes(userId)) ||
+      (this.config.adminRoleIds && memberRoles.some(r => this.config.adminRoleIds.includes(r)));
+
+    if (session.session_type === 'standalone') {
+      if (!session.user_id) return true;
+      if (session.user_id === userId || isAdmin) return true;
+      return false;
+    }
+
+    if (session.session_type === 'project' || session.project_id) {
+      return this.isProjectAllowedForUser(userId, memberRoles, session.project_id);
+    }
+
+    return true;
+  }
+
   canExecuteCommand(subcommand, userId, memberRoles = []) {
     if (!this.isUserAllowed(userId, memberRoles)) return false;
 

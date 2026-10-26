@@ -1,63 +1,28 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execSync, spawn } from 'node:child_process';
-import http from 'node:http';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { execSync } from 'node:child_process';
+import { startTestServer } from './test-helper.js';
 
-const BASE = 'http://127.0.0.1:4000';
-const TOKEN = 'test-token-123';
-
-let childServer = null;
-
-before(async () => {
-  try {
-    await req('/health');
-  } catch {
-    childServer = spawn('node', ['src/server.js'], {
-      env: { ...process.env, PORT: '4000', HOST: '127.0.0.1', ORCHESTRATOR_API_TOKEN: TOKEN, REQUIRE_AUTH: 'true' },
-      stdio: 'ignore'
-    });
-    for (let i = 0; i < 20; i++) {
-      await new Promise(r => setTimeout(r, 250));
-      try {
-        const res = await req('/health');
-        if (res.status === 200) break;
-      } catch {}
-    }
-  }
-});
-
-after(() => {
-  if (childServer) {
-    try { childServer.kill('SIGTERM'); } catch {}
-  }
-});
-
-const req = (path, method = 'GET', body = null) => {
-  return new Promise((resolve, reject) => {
-    const url = new URL(path, BASE);
-    const headers = { 'Content-Type': 'application/json' };
-    if (TOKEN) headers['Authorization'] = `Bearer ${TOKEN}`;
-    const opts = { method, headers };
-    const r = http.request(url, opts, (res) => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        let parsed = null;
-        try { parsed = JSON.parse(data); } catch { parsed = data; }
-        resolve({ status: res.statusCode, body: parsed });
-      });
-    });
-    r.on('error', reject);
-    if (body) r.write(JSON.stringify(body));
-    r.end();
-  });
-};
-
+let serverContext;
+let req;
+let TOKEN;
 let projectId;
 let serverPID;
+
+before(async () => {
+  serverContext = await startTestServer();
+  req = serverContext.req;
+  TOKEN = serverContext.token;
+});
+
+after(async () => {
+  if (serverPID) {
+    try { execSync(`kill -9 ${serverPID}`); } catch {}
+  }
+  if (serverContext) {
+    await serverContext.cleanup();
+  }
+});
 
 test('Test G: Parallel Workers', async () => {
   const projectRes = await req('/projects', 'POST', {
@@ -148,7 +113,7 @@ test('Test I: Crash Recovery', async () => {
   execSync(`kill -TERM ${serverPID}`, { stdio: 'pipe' });
   await new Promise(r => setTimeout(r, 3000));
 
-  serverPID = execSync('nohup node src/server.js > /tmp/server.log 2>&1 & echo $!', { encoding: 'utf8', env: { ...process.env, ORCHESTRATOR_API_TOKEN: TOKEN } }).trim();
+  serverPID = execSync('nohup node src/server.js > /tmp/server.log 2>&1 & echo $!', { encoding: 'utf8', env: serverContext.env }).trim();
   await new Promise(r => setTimeout(r, 2500));
 
   const recovered = await req(`/tasks/${taskId}`);

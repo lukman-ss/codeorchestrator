@@ -1,6 +1,6 @@
 # Database Architecture & Schema
 
-Coding Orchestrator uses SQLite via `better-sqlite3` as its persistent data store.
+Coding Orchestrator uses SQLite via `better-sqlite3` as its persistent operational data store.
 
 ## SQLite Configuration & Pragmas
 
@@ -48,24 +48,50 @@ Stores persistent project workspaces and repository settings.
 | `workspace_path` | TEXT | NOT NULL UNIQUE | Canonical filesystem path. |
 | `repo_url` | TEXT | NULLABLE | Remote Git clone URL. |
 | `default_model` | TEXT | DEFAULT '9router/ayce-combo' | Default LLM model identifier. |
-| `created_at` | TEXT | NOT NULL DEFAULT datetime('now') | ISO UTC timestamp. |
-| `updated_at` | TEXT | NOT NULL DEFAULT datetime('now') | ISO UTC timestamp. |
+| `is_test` | INTEGER | NOT NULL DEFAULT 0 | Provenance marker (1 = test project, 0 = operational). |
+| `metadata_json` | TEXT | DEFAULT '{}' | Structured metadata payload. |
+| `created_at` | TEXT | NOT NULL DEFAULT (datetime('now')) | ISO UTC timestamp. |
+| `updated_at` | TEXT | NOT NULL DEFAULT (datetime('now')) | ISO UTC timestamp. |
 
 ### 2. `sessions`
 
-Represents OpenCode interactive session contexts for reuse across tasks.
+Represents interactive OpenCode sessions. Supports both **standalone** sessions (`project_id IS NULL`) and **project-linked** sessions (`project_id NOT NULL`).
 
 | Column | Type | Constraints | Description |
 |---|---|---|---|
 | `id` | TEXT | PRIMARY KEY | UUID identifier. |
-| `project_id` | TEXT | REFERENCES `projects(id)` ON DELETE CASCADE | Associated project. |
-| `opencode_session_id` | TEXT | NULLABLE | Upstream OpenCode session identifier. |
-| `title` | TEXT | NULLABLE | Session title. |
+| `project_id` | TEXT | REFERENCES `projects(id)` ON DELETE CASCADE | Associated project or NULL for standalone. |
+| `opencode_session_id` | TEXT | NULLABLE | Upstream OpenCode session identifier (`ses_*`). |
+| `session_type` | TEXT | NOT NULL DEFAULT 'project' CHECK IN ('standalone','project') | Session mode. |
+| `title` | TEXT | NULLABLE | Human-readable session title. |
 | `model` | TEXT | NULLABLE | Session model override. |
-| `created_at` | TEXT | NOT NULL DEFAULT datetime('now') | ISO UTC timestamp. |
-| `updated_at` | TEXT | NOT NULL DEFAULT datetime('now') | ISO UTC timestamp. |
+| `status` | TEXT | NOT NULL DEFAULT 'active' CHECK IN ('created','active','idle','interrupted','closed') | Lifecycle status. |
+| `user_id` | TEXT | NULLABLE | Owning user ID for authorization. |
+| `runtime_path` | TEXT | NULLABLE | Isolated filesystem path for standalone sessions. |
+| `metadata_json` | TEXT | NOT NULL DEFAULT '{}' | Metadata JSON object. |
+| `created_at` | TEXT | NOT NULL DEFAULT (datetime('now')) | ISO UTC timestamp. |
+| `updated_at` | TEXT | NOT NULL DEFAULT (datetime('now')) | ISO UTC timestamp. |
 
-### 3. `tasks`
+*Table Constraint*:
+```sql
+CHECK((session_type = 'standalone' AND project_id IS NULL) OR (session_type = 'project' AND project_id IS NOT NULL))
+```
+
+### 3. `session_messages`
+
+Persistent conversation turn history for interactive sessions.
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | TEXT | PRIMARY KEY | UUID identifier. |
+| `session_id` | TEXT | REFERENCES `sessions(id)` ON DELETE CASCADE | Associated session. |
+| `role` | TEXT | NOT NULL CHECK IN ('user','assistant','system') | Message role. |
+| `content` | TEXT | NOT NULL | Message text payload. |
+| `opencode_session_id` | TEXT | NULLABLE | OpenCode session identifier at turn time. |
+| `metadata_json` | TEXT | DEFAULT '{}' | Optional turn metadata. |
+| `created_at` | TEXT | NOT NULL DEFAULT (datetime('now')) | ISO UTC timestamp. |
+
+### 4. `tasks`
 
 Queued and executed individual OpenCode tasks.
 
@@ -80,12 +106,12 @@ Queued and executed individual OpenCode tasks.
 | `pid` | INTEGER | NULLABLE | OS child process ID. |
 | `exit_code` | INTEGER | NULLABLE | Subprocess exit code. |
 | `error` | TEXT | NULLABLE | Error message on failure. |
-| `created_at` | TEXT | NOT NULL DEFAULT datetime('now') | Timestamp created. |
+| `created_at` | TEXT | NOT NULL DEFAULT (datetime('now')) | Timestamp created. |
 | `started_at` | TEXT | NULLABLE | Timestamp execution began. |
 | `finished_at`| TEXT | NULLABLE | Timestamp execution ended. |
-| `updated_at` | TEXT | NOT NULL DEFAULT datetime('now') | Last status update. |
+| `updated_at` | TEXT | NOT NULL DEFAULT (datetime('now')) | Last status update. |
 
-### 4. `task_events`
+### 5. `task_events`
 
 Sequential event stream for real-time WebSocket broadcasting and replay.
 
@@ -96,104 +122,19 @@ Sequential event stream for real-time WebSocket broadcasting and replay.
 | `sequence` | INTEGER | NOT NULL | Monotonic sequence per task. |
 | `type` | TEXT | NOT NULL | Event classification string. |
 | `payload_json` | TEXT | NULLABLE | Serialized event payload. |
-| `created_at` | TEXT | NOT NULL DEFAULT datetime('now') | Timestamp created. |
+| `created_at` | TEXT | NOT NULL DEFAULT (datetime('now')) | Timestamp created. |
 
-*Unique constraint*: `UNIQUE(task_id, sequence)`
+---
 
-### 5. `jobs`
+## Operational Migration & Maintenance Utilities
 
-High-level multi-agent jobs decomposed into requirements and subtasks.
-
-| Column | Type | Constraints | Description |
-|---|---|---|---|
-| `id` | TEXT | PRIMARY KEY | UUID identifier. |
-| `project_id` | TEXT | REFERENCES `projects(id)` ON DELETE CASCADE | Target project. |
-| `prompt` | TEXT | NOT NULL | High-level job plan or specification. |
-| `prompt_hash` | TEXT | NOT NULL | SHA-256 hash of the input prompt. |
-| `status` | TEXT | CHECK IN ('pending','planning','running','completed','partially_completed','failed','blocked','cancelled','interrupted') | Job lifecycle status. |
-| `plan_json` | TEXT | NULLABLE | Extracted requirement graph. |
-| `total_requirements` | INTEGER | DEFAULT 0 | Count of requirements. |
-| `verified_requirements` | INTEGER | DEFAULT 0 | Count of requirements verified. |
-| `completion_percent` | REAL | DEFAULT 0 | Verified requirement ratio. |
-| `final_audit_verdict` | TEXT | CHECK IN ('PASS','FAILED','BLOCKED','NOT_TESTED') | Final auditor decision. |
-| `report_json` | TEXT | NULLABLE | Comprehensive audit report. |
-| `created_at` | TEXT | NOT NULL DEFAULT datetime('now') | Job creation timestamp. |
-| `started_at` | TEXT | NULLABLE | Execution start timestamp. |
-| `finished_at`| TEXT | NULLABLE | Execution finish timestamp. |
-| `updated_at` | TEXT | NOT NULL DEFAULT datetime('now') | Timestamp updated. |
-
-### 6. `job_requirements`
-
-Individual specification items extracted from the job plan.
-
-| Column | Type | Constraints | Description |
-|---|---|---|---|
-| `id` | TEXT | PRIMARY KEY | UUID identifier. |
-| `job_id` | TEXT | REFERENCES `jobs(id)` ON DELETE CASCADE | Associated job. |
-| `requirement_id` | TEXT | NOT NULL | Identifier (e.g. `REQ-001`). |
-| `requirement_text` | TEXT | NOT NULL | Requirement description. |
-| `section_reference` | TEXT | NULLABLE | Markdown heading or section. |
-| `acceptance_criteria_json` | TEXT | DEFAULT '[]' | Acceptance criteria items. |
-| `mandatory` | INTEGER | DEFAULT 1 | 1 for mandatory, 0 for optional. |
-| `verification_status` | TEXT | CHECK IN ('unverified','verified','failed','blocked','not_tested') | Current verification state. |
-| `source_location` | TEXT | NULLABLE | Extracted file or line context. |
-| `created_at` | TEXT | NOT NULL DEFAULT datetime('now') | Timestamp created. |
-
-### 7. `job_subtasks`
-
-Executable work units assigned to agents.
-
-| Column | Type | Constraints | Description |
-|---|---|---|---|
-| `id` | TEXT | PRIMARY KEY | UUID identifier. |
-| `job_id` | TEXT | REFERENCES `jobs(id)` ON DELETE CASCADE | Associated job. |
-| `project_id` | TEXT | REFERENCES `projects(id)` ON DELETE CASCADE | Target project. |
-| `subtask_id` | TEXT | NOT NULL | Subtask identifier matching requirement. |
-| `title` | TEXT | NOT NULL | Title. |
-| `description` | TEXT | NULLABLE | Detailed description. |
-| `prompt` | TEXT | NOT NULL | Instruction prompt sent to agent. |
-| `acceptance_criteria_json` | TEXT | DEFAULT '[]' | Criteria for auditor verification. |
-| `model` | TEXT | NULLABLE | Model override. |
-| `role` | TEXT | CHECK IN ('worker','auditor','integration','supervisor') | Assigned role. |
-| `parent_subtask_id` | TEXT | NULLABLE | Parent subtask dependency. |
-| `depends_on_json` | TEXT | DEFAULT '[]' | Array of dependency requirement IDs. |
-| `status` | TEXT | CHECK IN (...) | Fine-grained execution state. |
-| `priority` | INTEGER | DEFAULT 0 | Scheduling priority. |
-| `attempt` | INTEGER | DEFAULT 0 | Current attempt number. |
-| `max_attempts` | INTEGER | DEFAULT 2 | Maximum attempts. |
-| `worktree_path` | TEXT | NULLABLE | Isolated worktree directory path. |
-| `worktree_branch` | TEXT | NULLABLE | Worktree Git branch name. |
-| `source_revision` | TEXT | NULLABLE | Git commit hash prior to changes. |
-| `open_code_session_id` | TEXT | NULLABLE | OpenCode session identifier. |
-| `process_pid` | INTEGER | NULLABLE | OS child process ID. |
-| `process_identity` | TEXT | NULLABLE | Compound identity string. |
-| `files_changed_json` | TEXT | DEFAULT '[]' | List of modified files. |
-| `result_json` | TEXT | NULLABLE | Output summary. |
-| `started_at` | TEXT | NULLABLE | Execution start. |
-| `finished_at`| TEXT | NULLABLE | Execution end. |
-| `created_at` | TEXT | NOT NULL DEFAULT datetime('now') | Created timestamp. |
-| `updated_at` | TEXT | NOT NULL DEFAULT datetime('now') | Updated timestamp. |
-
-### 8. `dependency_edges`
-
-Directed acyclic graph edges linking prerequisite subtasks:
-- `id` (PK), `job_id` (FK), `parent_subtask_id` (FK), `child_subtask_id` (FK). `UNIQUE(parent_subtask_id, child_subtask_id)`.
-
-### 9. `agent_executions`
-
-Execution log for all agent processes spawned across all subtask lifecycle stages:
-- Records `role` ('supervisor','worker','auditor','integration','repair'), `model`, `status`, `exit_code`, and `result_json`.
-
-### 10. `agent_audits`
-
-Formal audit evaluations generated by the Auditor agent:
-- Records `verdict` ('PASS','FAILED','BLOCKED','NOT_TESTED','PENDING','RUNNING'), `criteria_json`, `tests_json`, `evidence_json`, `findings_json`, and `summary`.
-
-### 11. `agent_integration_results`
-
-Records merge operations, conflict detections, and verification results during canonical branch integration.
-
-### 12. `integration_locks`
-
-Guarantees single-writer mutual exclusion during canonical workspace integration:
-- `id` (PK), `project_id` (FK, UNIQUE), `owner_process`, `owner_pid`, `acquired_at`, `heartbeat_at`.
+1. **`scripts/migrate.js`**:
+   - Performs automated backup before migration (`data/backups/orchestrator.db.<timestamp>.bak`).
+   - Runs transactional table rebuild of `sessions` with foreign keys temporarily disabled.
+   - Verifies SQLite foreign key integrity (`PRAGMA foreign_key_check`) and database health (`PRAGMA integrity_check`).
+2. **`scripts/rollback.js`**:
+   - Reverts migration safely from pre-migration backup while preserving transaction logs.
+3. **`scripts/cleanup-test-data.js`**:
+   - Classifies operational vs test records using `is_test` markers and slug naming conventions.
+   - Defaults to **dry-run mode** (`--dry-run` or no flags) to list candidate test rows and directories without mutating data.
+   - Supports `--mark` to flag historical records as test data (`is_test = 1`) without destructive directory deletion.
