@@ -21,8 +21,9 @@ export class OrchestratorApiClient {
       headers['Authorization'] = `Bearer ${this.apiToken}`;
     }
 
+    const effectiveTimeout = options.timeoutMs !== undefined ? options.timeoutMs : this.timeoutMs;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), options.timeoutMs || this.timeoutMs);
+    const timer = effectiveTimeout > 0 ? setTimeout(() => controller.abort(), effectiveTimeout) : null;
 
     try {
       const response = await fetch(url, {
@@ -51,13 +52,13 @@ export class OrchestratorApiClient {
       return data;
     } catch (err) {
       if (err.name === 'AbortError') {
-        const timeoutErr = new Error(`Request timed out after ${this.timeoutMs}ms: ${url}`);
+        const timeoutErr = new Error(`Request timed out after ${effectiveTimeout}ms: ${url}`);
         timeoutErr.status = 504;
         throw timeoutErr;
       }
       throw err;
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -170,11 +171,19 @@ export class OrchestratorApiClient {
     });
   }
 
-  async sendSessionMessage(sessionId, { prompt, model, userId } = {}, timeoutMs = 120000) {
+  async sendSessionMessage(sessionId, { prompt, model, userId } = {}, timeoutMs = 0) {
     return this.request(`/sessions/${sessionId}/messages`, {
       method: 'POST',
       body: { prompt, model, userId },
       timeoutMs
+    });
+  }
+
+  async sendSessionMessageAsync(sessionId, { prompt, model, userId } = {}) {
+    return this.request(`/sessions/${sessionId}/messages`, {
+      method: 'POST',
+      body: { prompt, model, userId, async: true },
+      timeoutMs: 15000
     });
   }
 

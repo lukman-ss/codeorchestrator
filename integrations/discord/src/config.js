@@ -82,7 +82,7 @@ export const config = {
   progressUpdateIntervalMs: Number(process.env.PROGRESS_UPDATE_INTERVAL_MS || 2000),
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 5000),
   maxAttachmentBytes: Number(process.env.MAX_ATTACHMENT_BYTES || 262144), // 256KB default
-  apiTimeoutMs: Number(process.env.ORCHESTRATOR_API_TIMEOUT_MS || 10000)
+  apiTimeoutMs: Number(process.env.ORCHESTRATOR_API_TIMEOUT_MS || 60000)
 };
 
 export default config;

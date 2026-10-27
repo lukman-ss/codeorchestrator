@@ -1015,24 +1015,60 @@ export async function handleButton(interaction) {
 
     try {
       let executionResult = null;
-      if (submission.submission_type === 'job' && submission.project_id) {
-        const job = await apiClient.createJob(submission.project_id, promptContent);
-        persistence.updateSubmission(subId, { executionId: job.id, status: 'completed' });
-        executionResult = { status: 'queued', output: `Job created with ID: ${job.id}` };
+      if (submission.project_id) {
+        if (submission.submission_type === 'job') {
+          const job = await apiClient.createJob(submission.project_id, promptContent);
+          persistence.updateSubmission(subId, { executionId: job.id, status: 'completed' });
+          persistence.saveExecution({
+            id: job.id,
+            kind: 'job',
+            guildId: interaction.guildId,
+            channelId: interaction.channelId,
+            userId,
+            messageId: interaction.message?.id || null,
+            projectId: submission.project_id,
+            projectSlug: project?.slug,
+            promptSnippet: promptContent.slice(0, 100),
+            status: 'queued'
+          });
+          executionResult = { status: 'queued', output: `Job created with ID: ${job.id}` };
+        } else {
+          const task = await apiClient.createTask(submission.project_id, {
+            prompt: promptContent,
+            sessionId: submission.session_id
+          });
+          persistence.updateSubmission(subId, { executionId: task.id, status: 'completed' });
+          persistence.saveExecution({
+            id: task.id,
+            kind: 'task',
+            guildId: interaction.guildId,
+            channelId: interaction.channelId,
+            userId,
+            messageId: interaction.message?.id || null,
+            projectId: submission.project_id,
+            projectSlug: project?.slug,
+            promptSnippet: promptContent.slice(0, 100),
+            status: task.status || 'queued'
+          });
+          executionResult = { status: 'queued', output: `Task queued with ID: ${task.id}` };
+        }
       } else if (submission.session_id) {
-        const msgRes = await apiClient.sendSessionMessage(submission.session_id, {
+        await apiClient.sendSessionMessageAsync(submission.session_id, {
           prompt: promptContent,
           userId
         });
         persistence.updateSubmission(subId, { status: 'completed' });
-        executionResult = { status: 'completed', response: msgRes?.response };
-      } else if (submission.project_id) {
-        const task = await apiClient.createTask(submission.project_id, {
-          prompt: promptContent,
-          sessionId: submission.session_id
+        persistence.saveExecution({
+          id: submission.session_id,
+          kind: 'session',
+          guildId: interaction.guildId,
+          channelId: interaction.channelId,
+          userId,
+          messageId: interaction.message?.id || null,
+          promptSnippet: promptContent.slice(0, 100),
+          status: 'running'
         });
-        persistence.updateSubmission(subId, { executionId: task.id, status: 'completed' });
-        executionResult = { status: 'queued', output: `Task queued with ID: ${task.id}` };
+        executionResult = { status: 'running', output: 'Session executing in background (WS tracked)' };
       } else {
         const session = await apiClient.createSession({
           title: promptContent.slice(0, 50).trim() || 'Specification Execution',
@@ -1040,22 +1076,45 @@ export async function handleButton(interaction) {
           userId
         });
         persistence.updateSubmission(subId, { sessionId: session.id });
-        const msgRes = await apiClient.sendSessionMessage(session.id, {
+        await apiClient.sendSessionMessageAsync(session.id, {
           prompt: promptContent,
           userId
         });
         persistence.updateSubmission(subId, { status: 'completed' });
-        executionResult = { status: 'completed', response: msgRes?.response };
+        persistence.saveExecution({
+          id: session.id,
+          kind: 'session',
+          guildId: interaction.guildId,
+          channelId: interaction.channelId,
+          userId,
+          messageId: interaction.message?.id || null,
+          promptSnippet: promptContent.slice(0, 100),
+          status: 'running'
+        });
+        executionResult = { status: 'running', output: 'Session executing in background (WS tracked)' };
       }
 
       const resultCard = formatExecutionResultCard(submission, executionResult, { projectSlug: project?.slug });
-      await interaction.editReply(resultCard);
+      try {
+        await interaction.editReply(resultCard);
+      } catch {
+        if (interaction.channel && typeof interaction.channel.send === 'function') {
+          await interaction.channel.send(resultCard).catch(() => {});
+        }
+      }
     } catch (err) {
       persistence.updateSubmission(subId, { status: 'failed' });
-      await interaction.editReply({
+      const failPayload = {
         content: redactSensitive(`❌ **Execution Failed**: ${err.message}`),
         components: []
-      });
+      };
+      try {
+        await interaction.editReply(failPayload);
+      } catch {
+        if (interaction.channel && typeof interaction.channel.send === 'function') {
+          await interaction.channel.send(failPayload).catch(() => {});
+        }
+      }
     }
     return;
   }

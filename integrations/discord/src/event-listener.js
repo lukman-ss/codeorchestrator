@@ -3,6 +3,7 @@ import config from './config.js';
 import {
   formatJobCard,
   formatTaskCard,
+  redactSensitive,
   safeMentions,
   safeMessageEdit,
   safeChannelSend
@@ -170,8 +171,9 @@ export class OrchestratorEventListener {
     const eventType = ev.type || ev.eventType;
     const taskId = ev.taskId || (ev.subtask && !ev.subtask.job_id ? ev.subtask.id : null);
     const jobId = ev.jobId || ev.subtask?.job_id || ev.payload?.job_id || ev.data?.job_id;
+    const sessionId = ev.sessionId || ev.payload?.sessionId || ev.data?.sessionId;
 
-    const id = jobId || taskId || ev.id;
+    const id = jobId || taskId || sessionId || ev.id;
     if (!id) return;
 
     // Deduplication check
@@ -276,6 +278,37 @@ export class OrchestratorEventListener {
         this.scheduleDiscordMessageUpdate(id, 'task', { ...exec, status: newStatus }, { latestEvent: latestEventText });
       }
     }
+
+    // Session Execution Events
+    if (exec.kind === 'session') {
+      let latestEventText = null;
+      let newStatus = exec.status;
+
+      if (eventType === 'session.started') {
+        newStatus = 'running';
+        latestEventText = 'OpenCode session started';
+      } else if (eventType === 'session.progress') {
+        latestEventText = 'Generating code...';
+      } else if (eventType === 'session.completed') {
+        newStatus = 'completed';
+        latestEventText = 'Session completed';
+      } else if (eventType === 'session.failed') {
+        newStatus = 'failed';
+        latestEventText = `Session failed: ${ev.payload?.error || ev.data?.error || 'error'}`;
+      }
+
+      this.persistence.updateExecution(id, {
+        status: newStatus,
+        lastEventSequence: ev.sequence ?? exec.last_event_sequence,
+        lastEventId: dedupKey
+      });
+
+      this.scheduleDiscordMessageUpdate(id, 'session', {
+        id,
+        status: newStatus,
+        response: ev.payload?.response || ev.data?.response || ''
+      }, { latestEvent: latestEventText });
+    }
   }
 
   scheduleDiscordMessageUpdate(id, kind, entity, extra = {}) {
@@ -290,10 +323,15 @@ export class OrchestratorEventListener {
     const existing = this.pendingUpdates.get(id);
 
     // Build formatted message content
-    const content =
-      kind === 'job'
-        ? formatJobCard(entity, { projectSlug: exec.project_slug, ...extra })
-        : formatTaskCard(entity, { projectSlug: exec.project_slug, ...extra });
+    let content = '';
+    if (kind === 'job') {
+      content = formatJobCard(entity, { projectSlug: exec.project_slug, ...extra });
+    } else if (kind === 'session') {
+      const respSnippet = entity.response ? `\n\n\`\`\`\n${redactSensitive(entity.response.slice(0, 1200))}\n\`\`\`` : '';
+      content = `### 🤖 Session Execution\n**ID**: \`${id}\`\n**Status**: \`${entity.status || exec.status}\`\n${extra.latestEvent ? `**Progress**: ${extra.latestEvent}\n` : ''}${respSnippet}`;
+    } else {
+      content = formatTaskCard(entity, { projectSlug: exec.project_slug, ...extra });
+    }
 
     if (isTerminal) {
       if (existing?.timeout) clearTimeout(existing.timeout);

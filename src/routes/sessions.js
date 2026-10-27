@@ -30,7 +30,8 @@ const patchSessionSchema = z.object({
 const messageSchema = z.object({
   prompt: z.string().min(1).max(MAX_PROMPT_LENGTH),
   model: z.string().nullish(),
-  userId: z.string().nullish()
+  userId: z.string().nullish(),
+  async: z.boolean().optional()
 });
 
 export default async function sessions(app) {
@@ -103,7 +104,12 @@ export default async function sessions(app) {
   // Execute conversation message with real OpenCode continuation
   app.post('/:id/messages', async (req, reply) => {
     try {
-      const { prompt, model, userId } = messageSchema.parse(req.body);
+      const { prompt, model, userId, async: isAsync } = messageSchema.parse(req.body);
+      if (isAsync || req.query?.async === 'true') {
+        ss.executeSessionMessage(req.params.id, { prompt, model, userId }).catch(() => {});
+        reply.code(202).send({ status: 'running', sessionId: req.params.id });
+        return;
+      }
       const result = await ss.executeSessionMessage(req.params.id, { prompt, model, userId });
       reply.send(result);
     } catch (e) {

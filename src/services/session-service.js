@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { dbGetOne, dbRun, dbGet } from '../database/db.js';
 import { getProject, validateProjectWorkspace } from './project-service.js';
+import { emitWebSocketEvent } from '../realtime/event-bus.js';
 import {
   OPENCODE_BIN,
   NINEROUTER_API_KEY,
@@ -269,6 +270,7 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
     }
 
     logger.info({ sessionId: session.id, model: targetModel, workingDir, hasSessionId: !!session.opencode_session_id }, 'Spawning OpenCode session message execution');
+    emitWebSocketEvent('session.started', null, { sessionId: session.id, projectId: session.project_id });
 
     const env = {
       ...process.env,
@@ -316,6 +318,7 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
           if (ev.type === 'text') {
             const partText = ev.part?.text || ev.text || '';
             assistantResponse += partText;
+            emitWebSocketEvent('session.progress', null, { sessionId: session.id, text: partText });
           }
         } catch {}
       };
@@ -338,6 +341,7 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
       child.on('error', (err) => {
         clearTimeout(timer);
         dbRun("UPDATE sessions SET status = 'interrupted', updated_at = datetime('now') WHERE id = ?", [session.id]);
+        emitWebSocketEvent('session.failed', null, { sessionId: session.id, error: err.message });
         reject(err);
       });
 
@@ -359,6 +363,7 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
             "UPDATE sessions SET status = 'idle', opencode_session_id = COALESCE(?, opencode_session_id), updated_at = datetime('now') WHERE id = ?",
             [capturedSessionId, session.id]
           );
+          emitWebSocketEvent('session.completed', null, { sessionId: session.id, response: finalResponse, status: 'completed' });
           resolve({
             sessionId: session.id,
             opencodeSessionId: capturedSessionId,
@@ -367,7 +372,9 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
           });
         } else {
           dbRun("UPDATE sessions SET status = 'interrupted', updated_at = datetime('now') WHERE id = ?", [session.id]);
-          reject(new Error(`OpenCode execution failed with exit code ${code}: ${stderrText || stdoutText}`));
+          const errMsg = `OpenCode execution failed with exit code ${code}: ${stderrText || stdoutText}`;
+          emitWebSocketEvent('session.failed', null, { sessionId: session.id, error: errMsg });
+          reject(new Error(errMsg));
         }
       });
     });
