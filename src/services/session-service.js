@@ -16,6 +16,10 @@ import logger from '../logger.js';
 // Mutex / Queue per session to prevent concurrent writes from corrupting OpenCode session context
 const sessionLocks = new Map();
 
+export const recoverSessions = () => {
+  dbRun("UPDATE sessions SET status = 'idle', updated_at = datetime('now') WHERE status = 'active'");
+};
+
 async function withSessionLock(sessionId, fn) {
   const previous = sessionLocks.get(sessionId) || Promise.resolve();
   let release;
@@ -273,6 +277,7 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
       }
 
       let stdoutText = '';
+      let stdoutBuffer = '';
       let stderrText = '';
       let capturedSessionId = session.opencode_session_id || null;
       let assistantResponse = '';
@@ -282,22 +287,29 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
         try { child.kill('SIGTERM'); } catch {}
       }, timeoutMs);
 
+      const processJsonLine = (line) => {
+        if (!line || !line.trim()) return;
+        try {
+          const ev = JSON.parse(line.trim());
+          if (ev.sessionID && !capturedSessionId) {
+            capturedSessionId = ev.sessionID;
+            dbRun("UPDATE sessions SET opencode_session_id = ?, updated_at = datetime('now') WHERE id = ?", [capturedSessionId, session.id]);
+          }
+          if (ev.type === 'text') {
+            const partText = ev.part?.text || ev.text || '';
+            assistantResponse += partText;
+          }
+        } catch {}
+      };
+
       child.stdout.on('data', (chunk) => {
         const text = chunk.toString();
         stdoutText += text;
-        const lines = text.split(/\r?\n/).filter(Boolean);
+        stdoutBuffer += text;
+        const lines = stdoutBuffer.split(/\r?\n/);
+        stdoutBuffer = lines.pop(); // Retain incomplete trailing slice
         for (const line of lines) {
-          try {
-            const ev = JSON.parse(line);
-            if (ev.sessionID && !capturedSessionId) {
-              capturedSessionId = ev.sessionID;
-              dbRun("UPDATE sessions SET opencode_session_id = ?, updated_at = datetime('now') WHERE id = ?", [capturedSessionId, session.id]);
-            }
-            if (ev.type === 'text') {
-              const partText = ev.part?.text || ev.text || '';
-              assistantResponse += partText;
-            }
-          } catch {}
+          processJsonLine(line);
         }
       });
 
@@ -313,6 +325,10 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
 
       child.on('exit', (code) => {
         clearTimeout(timer);
+        if (stdoutBuffer) {
+          processJsonLine(stdoutBuffer);
+          stdoutBuffer = '';
+        }
         if (code === 0) {
           const finalResponse = assistantResponse.trim() || stdoutText.trim();
           const assistantMsgId = randomUUID();

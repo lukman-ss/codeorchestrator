@@ -126,6 +126,51 @@ Sequential event stream for real-time WebSocket broadcasting and replay.
 
 ---
 
+## Discord Bridge Database (`bridge.db`)
+
+The Discord Bridge maintains an independent SQLite database (`bridge.db`) tracking Discord-specific interaction mapping, message deduplication, and conversational scopes:
+
+### 1. `discord_conversations`
+
+Tracks the active conversational context per authorized user and scope (channel or thread):
+
+```sql
+CREATE TABLE discord_conversations (
+  id TEXT PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  thread_id TEXT,
+  discord_user_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  project_id TEXT,
+  conversation_type TEXT NOT NULL DEFAULT 'standalone' CHECK(conversation_type IN ('standalone', 'project')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'closed', 'archived')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_activity_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+### 2. `discord_session_messages`
+
+Tracks message deduplication, idempotency, role, and execution lifecycle:
+
+```sql
+CREATE TABLE discord_session_messages (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  discord_message_id TEXT NOT NULL UNIQUE,
+  referenced_message_id TEXT,
+  message_role TEXT NOT NULL CHECK(message_role IN ('user', 'assistant', 'system')),
+  status TEXT NOT NULL DEFAULT 'completed' CHECK(status IN ('received', 'queued', 'running', 'completed', 'failed')),
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+---
+
 ## Operational Migration & Maintenance Utilities
 
 1. **`scripts/migrate.js`**:

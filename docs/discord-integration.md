@@ -38,15 +38,31 @@ All commands are organized under the `/code` command group:
 
 ### Standalone & Interactive Sessions
 
+#### Natural Chat (Mention & Reply)
+- **Start or Continue via Mention**: Mentioning `@Agent Coding <prompt>` in an authorized channel triggers natural conversation. If an active conversation exists for the user in the channel/thread, it continues that session. Otherwise, a fresh standalone session is created (`project_id = NULL`).
+- **Continue via Direct Reply**: Replying directly to any message sent by the bot routes the prompt into the associated OpenCode session.
+- **Historical Session Branching**: Replying to an older bot message routes specifically to that historical session, allowing users to revisit earlier conversation topics without conflating them with recent chats.
+- **Scope & Privacy**: Scope defaults to one active standalone session per user per channel/thread. User B cannot reply to or hijack User A's private standalone session.
+- **Chunking & Attachments**: Responses are split safely at <= 1,900 chars. If a response exceeds 3 chunks, chunk 0 is sent with a sanitized `.txt` attachment containing the complete response.
+- **Intent Handling**: Attempts to connect with `GatewayIntentBits.MessageContent`. If the intent is disabled in Discord Developer Portal, it gracefully catches `DisallowedIntents` and falls back to standard intents (`Guilds`, `GuildMessages`), keeping mention-based natural chat fully operational.
+
 #### `/code chat prompt:<text> [session:<id>] [model:<model>]`
 - Starts a new standalone session or continues an existing conversation.
 - If `session` is omitted, automatically spins up a standalone session (no workspace or project created).
 - Retains conversational context via real OpenCode continuation.
 
-#### `/code session title:<text> [project:<name>] [model:<model>]`
-- Creates an interactive session.
-- If `project` is omitted: Creates an independent Standalone Session.
+#### `/code session new title:<text> [project:<name>] [model:<model>]`
+- Explicitly creates a new interactive session.
+- If `project` is omitted: Creates an independent Standalone Session (`project_id = NULL`).
 - If `project` is provided: Creates a Project-Linked Session scoped to that workspace.
+
+#### `/code session info [session:<id>]`
+- Inspects session metadata, OpenCode session ID, type, status, model, and message history count.
+- If `session` is omitted, displays metadata for the user's active conversation in the current channel.
+
+#### `/code session close [session:<id>]`
+- Archives the active conversation and sets session status to `closed` without deleting history.
+- Next mention or chat interaction in the channel starts a fresh standalone session.
 
 #### `/code resume session:<id> prompt:<text>`
 - Continues an existing OpenCode session with follow-up instructions or queries.
@@ -118,6 +134,17 @@ Environment variables in `integrations/discord/.env`:
 
 ## 4. Message Size & Splitting Rules
 
-- Messages strictly adhere to Discord's 2,000-character ceiling.
+- Messages strictly adhere to Discord's 2,000-character ceiling with a safe limit of 1,900 chars per chunk.
 - Chunks are split at paragraph boundaries (`\n\n`), code block boundaries, or lines (`\n`), never breaking Unicode surrogate pairs.
-- Large execution reports or audit outputs exceeding 1,800 characters are formatted as clean Markdown summaries with a full `.txt` sanitized file attachment.
+- Up to 3 chunks are delivered sequentially (chunk 0 as reply, chunks 1-2 sent directly to channel).
+- When a response exceeds 3 chunks, chunk 0 is sent with an attached sanitized `response.txt` file containing the full output.
+- All chunk message IDs are persisted into `discord_session_messages` with status `completed`.
+
+---
+
+## 5. Idempotency, Session Queuing & Lifecycle
+
+- **Message States**: Every incoming natural chat turn and slash message is tracked in `discord_session_messages` across states: `received` → `queued` → `running` → `completed` (or `failed`).
+- **Duplicate Prevention**: Redelivered Discord message IDs in `running` or `completed` states are dropped immediately.
+- **Session Mutex / Serialization**: Multiple concurrent messages targeted to the same session are serialized sequentially in-memory (`serializeSession`) and backend session locks to avoid concurrent OpenCode context corruption.
+- **Startup Reconciliation**: On bridge start or restart, `reconcileRunningMessages()` reconciles any lingering `received`, `queued`, or `running` records to `failed` (`Bridge restart during execution`). Backend `recoverSessions()` resets `active` sessions back to `idle`.

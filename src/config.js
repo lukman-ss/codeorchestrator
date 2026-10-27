@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import { config } from 'node:process';
 
 const DEFAULT_ROOT = process.cwd();
@@ -7,7 +8,24 @@ const DEFAULT_WORKSPACE = process.env.HOME ? resolve(process.env.HOME, 'workspac
 export const NODE_ENV = process.env.NODE_ENV || 'production';
 export const PORT = Number(process.env.PORT || 4000);
 export const HOST = process.env.HOST || '127.0.0.1';
-export const OPENCODE_BIN = process.env.OPENCODE_BIN || 'opencode';
+
+function resolveOpencodeBin() {
+  const custom = process.env.OPENCODE_BIN;
+  if (custom && existsSync(custom)) return custom;
+  const candidates = [
+    custom,
+    process.env.HOME ? resolve(process.env.HOME, '.local/npm/bin/opencode') : null,
+    process.env.HOME ? resolve(process.env.HOME, '.local/bin/opencode') : null,
+    '/usr/local/bin/opencode',
+    '/usr/bin/opencode'
+  ].filter(Boolean);
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return custom || 'opencode';
+}
+
+export const OPENCODE_BIN = resolveOpencodeBin();
 export const NINEROUTER_API_KEY = process.env.NINEROUTER_API_KEY || '';
 export const ORCHESTRATOR_ROOT = process.env.ORCHESTRATOR_ROOT || DEFAULT_ROOT;
 export const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || DEFAULT_WORKSPACE;

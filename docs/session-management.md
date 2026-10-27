@@ -93,11 +93,20 @@ Concurrent requests for the same session wait in sequence; requests for differen
 
 ---
 
-## 5. Security & Boundary Invariants
+## 6. Natural Chat & Discord Conversation Mapping
 
-1. **Workspace Boundary Protection**: Once created, a session cannot be patched to alter `projectId` or `session_type`. Attempting to convert a standalone session into a project session (or vice-versa) is rejected with an HTTP 400 error.
-2. **Access Control**: Sessions with a `user_id` restrict message execution to the owning user or authorized administrative roles.
-3. **Closed Session Protection**: Once a session status is set to `'closed'`, subsequent message executions are rejected with HTTP 409 Conflict.
+In the Discord Bridge integration (`bridge.db`), natural chat interactions map directly into real OpenCode sessions:
+
+1. **Conversation Scoping (`discord_conversations`)**:
+   - Scoped by `(guild_id, channel_id, thread_id, discord_user_id, status)`.
+   - Default: One active standalone session (`project_id = NULL`) per authorized user per channel/thread.
+   - User B cannot reply to or continue User A's private standalone session.
+2. **Historical Routing (`discord_session_messages`)**:
+   - Maps each Discord message ID to its conversation and session ID.
+   - Direct replies to older bot messages look up the message's historical `session_id`, allowing users to branch or resume past sessions effortlessly.
+3. **Session Lifecycle & Recovery**:
+   - On orchestrator boot, `recoverSessions()` resets any sessions left in `'active'` state back to `'idle'`.
+   - When closed via `/code session close` or PATCH `/sessions/:id` (`status = 'closed'`), the conversation record is archived (`status = 'closed'`), and the next user mention creates a fresh standalone session.
 
 ---
 

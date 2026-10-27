@@ -119,23 +119,32 @@ See [Configuration Guide](docs/configuration.md) for all options.
 
 ## Discord Bot Integration
 
-CodeOrchestrator includes an isolated Discord Bridge (`integrations/discord/`) implementing slash commands under `/code` with Hermes-like automatic channel discovery and originating-channel notification routing:
+CodeOrchestrator includes an isolated Discord Bridge (`integrations/discord/`) implementing natural chat conversations and slash commands under `/code`:
 
-- `/code project create`: Create a persistent project workspace via an interactive modal form and confirmation card
-- `/code project import`: Register an unmanaged directory under workspace root with stack detection
-- `/code project info`: Inspect project details, git remote, default branch, model, and active sessions
-- `/code projects`: View accessible persistent coding workspaces with relative slugs and Git status
-- `/code chat`: Start or continue a standalone conversation without creating a project
-- `/code session`: Explicitly create a standalone or project-linked session
-- `/code resume`: Send follow-up prompt to an existing OpenCode session
-- `/code sessions`: List authorized standalone and project sessions
-- `/code run`: Submit single coding tasks to a project workspace
-- `/code job`: Submit multi-agent workflows with automated worker, auditor, and integration roles
-- `/code status`: Real-time task, job, or session status inspection
-- `/code audit`: Independent auditor findings and verification evidence
-- `/code report`: Final execution summaries
-- `/code cancel`: Idempotent task/job cancellation with explicit confirmation
-- `/code help`: Command usage summary
+- **Natural Chat Interaction**:
+  - Mention `@Agent Coding <prompt>` in any authorized channel to start or continue an active standalone session.
+  - Reply directly to any bot message to continue that specific conversation branch (routes back to the exact historical OpenCode session).
+  - One active standalone session per user per channel/thread; cross-user isolation prevents hijacking.
+  - Automatic multi-chunk handling: splits messages <= 1,900 chars; attaches sanitized `.txt` file when response exceeds 3 chunks.
+  - Graceful fallback on `GatewayIntentBits.MessageContent` if privileged intent is pending in Discord Developer Portal.
+- **Slash Commands**:
+  - `/code session new title:<text> [project:<name>] [model:<model>]`: Explicitly create a standalone or project-linked session
+  - `/code session info [session:<id>]`: View session metadata, turn count, and token usage
+  - `/code session close [session:<id>]`: Archive active conversation without deleting history
+  - `/code chat prompt:<text> [session:<id>] [model:<model>]`: Start or continue a conversation
+  - `/code resume session:<id> prompt:<text>`: Send follow-up prompt to an existing OpenCode session
+  - `/code sessions [project:<name>] [page:<num>]`: List authorized standalone and project sessions
+  - `/code project create`: Create a persistent project workspace via an interactive modal form and confirmation card
+  - `/code project import`: Register an unmanaged directory under workspace root with stack detection
+  - `/code project info`: Inspect project details, git remote, default branch, model, and active sessions
+  - `/code projects`: View accessible persistent coding workspaces with relative slugs and Git status
+  - `/code run`: Submit single coding tasks to a project workspace
+  - `/code job`: Submit multi-agent workflows with automated worker, auditor, and integration roles
+  - `/code status`: Real-time task, job, or session status inspection
+  - `/code audit`: Independent auditor findings and verification evidence
+  - `/code report`: Final execution summaries
+  - `/code cancel`: Idempotent task/job cancellation with explicit confirmation
+  - `/code help`: Command usage summary
 
 For full documentation and systemd setup, see [Discord Integration Guide](docs/discord-integration.md).
 

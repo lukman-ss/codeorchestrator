@@ -10,10 +10,12 @@ export class OrchestratorApiClient {
   async request(path, options = {}) {
     const url = `${this.baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
     const headers = {
-      'Content-Type': 'application/json',
       'Accept': 'application/json',
       ...options.headers
     };
+    if (options.body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+    }
 
     if (this.apiToken) {
       headers['Authorization'] = `Bearer ${this.apiToken}`;
@@ -143,10 +145,24 @@ export class OrchestratorApiClient {
     });
   }
 
-  async sendSessionMessage(sessionId, { prompt, model, userId } = {}) {
+  async updateSession(id, patch = {}) {
+    return this.request(`/sessions/${id}`, {
+      method: 'PATCH',
+      body: patch
+    });
+  }
+
+  async deleteSession(id) {
+    return this.request(`/sessions/${id}`, {
+      method: 'DELETE'
+    });
+  }
+
+  async sendSessionMessage(sessionId, { prompt, model, userId } = {}, timeoutMs = 120000) {
     return this.request(`/sessions/${sessionId}/messages`, {
       method: 'POST',
-      body: { prompt, model, userId }
+      body: { prompt, model, userId },
+      timeoutMs
     });
   }
 

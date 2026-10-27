@@ -132,28 +132,57 @@ export const data = new SlashCommandBuilder()
           .setRequired(false)
       )
   )
-  .addSubcommand(sub =>
-    sub
+  .addSubcommandGroup(group =>
+    group
       .setName('session')
-      .setDescription('Create a new session (standalone or project-linked)')
-      .addStringOption(opt =>
-        opt
-          .setName('title')
-          .setDescription('Session title or topic')
-          .setRequired(true)
+      .setDescription('Session conversation management')
+      .addSubcommand(sub =>
+        sub
+          .setName('new')
+          .setDescription('Explicitly create a fresh standalone session')
+          .addStringOption(opt =>
+            opt
+              .setName('title')
+              .setDescription('Session title or topic')
+              .setRequired(true)
+          )
+          .addStringOption(opt =>
+            opt
+              .setName('project')
+              .setDescription('Optional project to link workspace context')
+              .setRequired(false)
+              .setAutocomplete(true)
+          )
+          .addStringOption(opt =>
+            opt
+              .setName('model')
+              .setDescription('Model override')
+              .setRequired(false)
+          )
       )
-      .addStringOption(opt =>
-        opt
-          .setName('project')
-          .setDescription('Optional project to link workspace context')
-          .setRequired(false)
-          .setAutocomplete(true)
+      .addSubcommand(sub =>
+        sub
+          .setName('info')
+          .setDescription('Show current conversation/session metadata')
+          .addStringOption(opt =>
+            opt
+              .setName('session')
+              .setDescription('Session ID (leave empty for current active conversation)')
+              .setRequired(false)
+              .setAutocomplete(true)
+          )
       )
-      .addStringOption(opt =>
-        opt
-          .setName('model')
-          .setDescription('Model override')
-          .setRequired(false)
+      .addSubcommand(sub =>
+        sub
+          .setName('close')
+          .setDescription('Close or archive a selected conversation without deleting history')
+          .addStringOption(opt =>
+            opt
+              .setName('session')
+              .setDescription('Session ID to close (leave empty for current active conversation)')
+              .setRequired(false)
+              .setAutocomplete(true)
+          )
       )
   )
   .addSubcommand(sub =>
@@ -435,7 +464,12 @@ export async function execute(interaction, eventListener = null) {
       case 'chat':
         return await handleChat(interaction, userId, memberRoles);
       case 'session':
-        return await handleSession(interaction, userId, memberRoles);
+      case 'session:new':
+        return await handleSessionNew(interaction, userId, memberRoles);
+      case 'session:info':
+        return await handleSessionInfo(interaction, userId, memberRoles);
+      case 'session:close':
+        return await handleSessionClose(interaction, userId, memberRoles);
       case 'resume':
         return await handleResume(interaction, userId, memberRoles);
       case 'run':
@@ -897,6 +931,12 @@ async function handleChat(interaction, userId, memberRoles) {
   const modelOverride = interaction.options.getString('model') || undefined;
 
   let session = null;
+  let conversationScope = {
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    threadId: null,
+    discordUserId: userId
+  };
 
   if (sessionInput) {
     session = await apiClient.resolveSession(sessionInput);
@@ -913,13 +953,37 @@ async function handleChat(interaction, userId, memberRoles) {
       }, { type: 'auth_denied' });
     }
   } else {
-    // Create new standalone session
-    session = await apiClient.createSession({
-      title: prompt.slice(0, 50).trim(),
-      type: 'standalone',
-      model: modelOverride,
-      userId
-    });
+    // Check if user has an active conversation in current channel
+    let activeConv = persistence.getActiveConversation(conversationScope);
+    if (activeConv) {
+      try {
+        const s = await apiClient.getSession(activeConv.session_id);
+        if (s && s.status !== 'closed') {
+          session = s;
+        }
+      } catch {}
+    }
+
+    if (!session) {
+      // Create new standalone session
+      session = await apiClient.createSession({
+        title: prompt.slice(0, 50).trim(),
+        type: 'standalone',
+        model: modelOverride,
+        userId
+      });
+
+      activeConv = persistence.createConversation({
+        id: randomUUID(),
+        guildId: conversationScope.guildId,
+        channelId: conversationScope.channelId,
+        threadId: conversationScope.threadId,
+        discordUserId: userId,
+        sessionId: session.id,
+        conversationType: 'standalone',
+        status: 'active'
+      });
+    }
   }
 
   const result = await apiClient.sendSessionMessage(session.id, {
@@ -939,7 +1003,7 @@ async function handleChat(interaction, userId, memberRoles) {
     '**Response:**'
   ].join('\n');
 
-  const footer = `\n\n_Continue with:_ \`/code resume session:${session.id} prompt:<text>\``;
+  const footer = `\n\n_Continue by replying to this message or:_ \`/code resume session:${session.id} prompt:<text>\``;
   const fullContent = redactSensitive(`${header}\n${replyText}${footer}`);
 
   const reply = await safeEditReply(interaction, {
@@ -958,9 +1022,37 @@ async function handleChat(interaction, userId, memberRoles) {
     promptSnippet: prompt.slice(0, 100),
     status: result.status || 'idle'
   });
+
+  let conv = persistence.getConversationBySessionId(session.id);
+  if (!conv) {
+    conv = persistence.createConversation({
+      id: randomUUID(),
+      guildId: interaction.guildId,
+      channelId: interaction.channelId,
+      discordUserId: userId,
+      sessionId: session.id,
+      projectId: session.project_id || null,
+      conversationType: session.session_type || 'standalone',
+      status: 'active'
+    });
+  } else {
+    persistence.updateConversation(conv.id, { last_activity_at: new Date().toISOString() });
+  }
+
+  if (reply?.id) {
+    persistence.saveSessionMessage({
+      id: randomUUID(),
+      conversationId: conv.id,
+      sessionId: session.id,
+      discordMessageId: reply.id,
+      referencedMessageId: null,
+      messageRole: 'assistant',
+      status: 'completed'
+    });
+  }
 }
 
-async function handleSession(interaction, userId, memberRoles) {
+async function handleSessionNew(interaction, userId, memberRoles) {
   const title = interaction.options.getString('title', true);
   const projectInput = interaction.options.getString('project');
   const model = interaction.options.getString('model') || undefined;
@@ -986,6 +1078,17 @@ async function handleSession(interaction, userId, memberRoles) {
       userId
     });
 
+    persistence.createConversation({
+      id: randomUUID(),
+      guildId: interaction.guildId,
+      channelId: interaction.channelId,
+      discordUserId: userId,
+      sessionId: session.id,
+      projectId: project.id,
+      conversationType: 'project',
+      status: 'active'
+    });
+
     const lines = [
       '✅ **Project Session Created**',
       `• **Title:** ${session.title}`,
@@ -996,7 +1099,7 @@ async function handleSession(interaction, userId, memberRoles) {
       `• **Model:** \`${session.model || 'default'}\``,
       `• **Status:** \`${session.status}\``,
       '',
-      `_Start conversation with:_ \`/code resume session:${session.id} prompt:<text>\``
+      `_Start conversation with:_ \`/code resume session:${session.id} prompt:<text>\` or mention @Agent Coding.`
     ];
 
     return safeEditReply(interaction, {
@@ -1013,6 +1116,16 @@ async function handleSession(interaction, userId, memberRoles) {
     userId
   });
 
+  persistence.createConversation({
+    id: randomUUID(),
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    discordUserId: userId,
+    sessionId: session.id,
+    conversationType: 'standalone',
+    status: 'active'
+  });
+
   const lines = [
     '✅ **Standalone Session Created**',
     `• **Title:** ${session.title}`,
@@ -1021,13 +1134,128 @@ async function handleSession(interaction, userId, memberRoles) {
     `• **Model:** \`${session.model || 'default'}\``,
     `• **Status:** \`${session.status}\``,
     '',
-    `_Start conversation with:_ \`/code resume session:${session.id} prompt:<text>\``
+    `_Start conversation with:_ \`/code resume session:${session.id} prompt:<text>\` or mention @Agent Coding.`
   ];
 
   return safeEditReply(interaction, {
     content: lines.join('\n'),
     allowedMentions: safeMentions
   }, { type: 'session_created' });
+}
+
+async function handleSessionInfo(interaction, userId, memberRoles) {
+  const sessionInput = interaction.options.getString('session');
+  let session = null;
+
+  if (sessionInput) {
+    session = await apiClient.resolveSession(sessionInput);
+    if (!session) {
+      return safeEditReply(interaction, {
+        content: `❌ Session \`${sessionInput}\` not found.`,
+        allowedMentions: safeMentions
+      }, { type: 'session_error' });
+    }
+  } else {
+    // Resolve active conversation in scope
+    const activeConv = persistence.getActiveConversation({
+      guildId: interaction.guildId,
+      channelId: interaction.channelId,
+      discordUserId: userId
+    });
+    if (!activeConv) {
+      return safeEditReply(interaction, {
+        content: 'No active conversation found in this channel. Start one by mentioning @Agent Coding or using `/code chat`.',
+        allowedMentions: safeMentions
+      }, { type: 'session_info' });
+    }
+    session = await apiClient.getSession(activeConv.session_id).catch(() => null);
+    if (!session) {
+      return safeEditReply(interaction, {
+        content: `❌ Could not retrieve session \`${activeConv.session_id}\` from CodeOrchestrator.`,
+        allowedMentions: safeMentions
+      }, { type: 'session_error' });
+    }
+  }
+
+  if (!auth.isSessionAllowedForUser(userId, memberRoles, session)) {
+    return safeEditReply(interaction, {
+      content: `❌ Access Denied: You do not have permission to view session \`${session.id}\`.`,
+      allowedMentions: safeMentions
+    }, { type: 'auth_denied' });
+  }
+
+  const messages = await apiClient.getSessionMessages(session.id).catch(() => []);
+  const isStandalone = session.session_type === 'standalone' || !session.project_id;
+  const typeLabel = isStandalone ? 'Standalone' : `Project-Linked (${session.project_id})`;
+
+  const lines = [
+    '📋 **Session Information**',
+    '',
+    `• **Title:** ${session.title || 'Untitled Session'}`,
+    `• **Session ID:** \`${session.id}\``,
+    `• **OpenCode Session ID:** \`${session.opencode_session_id || 'Not initialized yet'}\``,
+    `• **Type:** ${typeLabel}`,
+    `• **Status:** \`${session.status || 'idle'}\``,
+    `• **Model:** \`${session.model || 'default'}\``,
+    `• **Recorded Messages:** ${messages.length}`,
+    `• **Created At:** ${session.created_at}`,
+    `• **Updated At:** ${session.updated_at || session.created_at}`
+  ];
+
+  return safeEditReply(interaction, {
+    content: redactSensitive(lines.join('\n')),
+    allowedMentions: safeMentions
+  }, { type: 'session_info' });
+}
+
+async function handleSessionClose(interaction, userId, memberRoles) {
+  const sessionInput = interaction.options.getString('session');
+  let session = null;
+  let conv = null;
+
+  if (sessionInput) {
+    session = await apiClient.resolveSession(sessionInput);
+    if (!session) {
+      return safeEditReply(interaction, {
+        content: `❌ Session \`${sessionInput}\` not found.`,
+        allowedMentions: safeMentions
+      }, { type: 'session_error' });
+    }
+    conv = persistence.getConversationBySessionId(session.id);
+  } else {
+    conv = persistence.getActiveConversation({
+      guildId: interaction.guildId,
+      channelId: interaction.channelId,
+      discordUserId: userId
+    });
+    if (!conv) {
+      return safeEditReply(interaction, {
+        content: 'No active conversation found in this channel to close.',
+        allowedMentions: safeMentions
+      }, { type: 'session_error' });
+    }
+    session = await apiClient.getSession(conv.session_id).catch(() => null);
+  }
+
+  if (session && !auth.isSessionAllowedForUser(userId, memberRoles, session)) {
+    return safeEditReply(interaction, {
+      content: `❌ Access Denied: You do not have permission to close session \`${session.id}\`.`,
+      allowedMentions: safeMentions
+    }, { type: 'auth_denied' });
+  }
+
+  if (session) {
+    await apiClient.updateSession(session.id, { status: 'closed' }).catch(() => {});
+  }
+  if (conv) {
+    persistence.closeConversation(conv.id);
+  }
+
+  const title = session?.title || session?.id || 'current';
+  return safeEditReply(interaction, {
+    content: `✅ Session **${title}** has been closed and archived. Conversation history is preserved. Next mention will start a fresh session.`,
+    allowedMentions: safeMentions
+  }, { type: 'session_closed' });
 }
 
 async function handleResume(interaction, userId, memberRoles) {
@@ -1065,13 +1293,29 @@ async function handleResume(interaction, userId, memberRoles) {
     '**Response:**'
   ].join('\n');
 
-  const footer = `\n\n_Continue with:_ \`/code resume session:${session.id} prompt:<text>\``;
+  const footer = `\n\n_Continue by replying to this message or:_ \`/code resume session:${session.id} prompt:<text>\``;
   const fullContent = redactSensitive(`${header}\n${replyText}${footer}`);
 
-  return safeEditReply(interaction, {
+  const reply = await safeEditReply(interaction, {
     content: fullContent,
     allowedMentions: safeMentions
   }, { type: 'resume_response' });
+
+  let conv = persistence.getConversationBySessionId(session.id);
+  if (conv) {
+    persistence.updateConversation(conv.id, { last_activity_at: new Date().toISOString() });
+    if (reply?.id) {
+      persistence.saveSessionMessage({
+        id: randomUUID(),
+        conversationId: conv.id,
+        sessionId: session.id,
+        discordMessageId: reply.id,
+        referencedMessageId: null,
+        messageRole: 'assistant',
+        status: 'completed'
+      });
+    }
+  }
 }
 
 async function handleRun(interaction, userId, memberRoles, eventListener) {
@@ -1449,8 +1693,14 @@ async function handleHelp(interaction) {
     '`/code chat prompt:<text> [session:<id>] [model:<model>]`',
     'Start or continue a standalone conversation without selecting a project.',
     '',
-    '`/code session title:<text> [project:<name>] [model:<model>]`',
+    '`/code session new title:<text> [project:<name>] [model:<model>]`',
     'Create a standalone session or project-linked session.',
+    '',
+    '`/code session info session:<id>`',
+    'View OpenCode session metadata, turn count, and token usage.',
+    '',
+    '`/code session close session:<id>`',
+    'Close an active OpenCode session.',
     '',
     '`/code resume session:<id> prompt:<text>`',
     'Continue an existing OpenCode session with follow-up message.',

@@ -138,6 +138,26 @@ To prevent corrupted Git histories and merge collisions, integration is guarded 
 
 ### 5. Crash Recovery and State Reconciliation
 
-- On startup (`src/server.js`), `recoverRunning()` queries all tasks marked as `running`.
-- Any tasks orphaned by an unexpected server exit or machine reboot are transitioned to `interrupted`.
-- Interrupted events are persisted to `task_events` and broadcast to WebSocket clients upon reconnection.
+- On startup (`src/server.js`), `recoverRunning()` queries all tasks marked as `running`. Any tasks orphaned by an unexpected server exit or machine reboot are transitioned to `interrupted`.
+- `recoverSessions()` resets any sessions in `active` state back to `idle`.
+- In the Discord Bridge service, `reconcileRunningMessages()` reconciles lingering natural chat messages in `received`, `queued`, or `running` states to `failed` (`Bridge restart during execution`).
+
+### 6. Discord Gateway & Natural Chat Plane
+
+```mermaid
+flowchart LR
+    DiscordUser[Discord User] -->|@Mention or Reply| Bridge[Discord Bridge]
+    Bridge --> ScopeCheck{Resolve Scope / Session}
+    ScopeCheck -->|Historical Reply| HistoricalSession[Target Prior Session]
+    ScopeCheck -->|Active Scope| ActiveSession[Target Channel Session]
+    ScopeCheck -->|New Turn| CreateSession[POST /sessions standalone]
+    
+    HistoricalSession --> Lock[Per-Session Mutex Queue]
+    ActiveSession --> Lock
+    CreateSession --> Lock
+    Lock --> OrchestratorAPI[POST /sessions/:id/messages]
+    OrchestratorAPI --> OpenCodeCLI[opencode run -s sessionId]
+    OpenCodeCLI --> Splitter[Message Splitter & Sanitizer]
+    Splitter -->|<= 3 Chunks| MultiReply[Sequential Discord Replies]
+    Splitter -->|> 3 Chunks| TextAttach[Discord Reply + response.txt File]
+```

@@ -89,7 +89,7 @@ curl -X DELETE http://127.0.0.1:4000/sessions/<SESSION_ID> -H "Authorization: Be
 ```
 
 ### `POST /sessions/:id/messages`
-Executes an interactive turn with real OpenCode continuation and per-session concurrency mutex lock.
+Executes an interactive turn with real OpenCode continuation and per-session concurrency mutex lock. Rejects executions on closed sessions with HTTP 409 Conflict. Requests targeted to the same session ID are serialized sequentially.
 
 ```bash
 curl -X POST http://127.0.0.1:4000/sessions/<SESSION_ID>/messages \

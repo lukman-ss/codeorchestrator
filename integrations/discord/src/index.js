@@ -14,6 +14,7 @@ import persistence from './persistence.js';
 import auth from './authorization.js';
 import { OrchestratorEventListener } from './event-listener.js';
 import codeCommand, { data as codeCommandData } from './commands/code.js';
+import { handleMessage } from './natural-chat.js';
 import {
   safeMentions,
   safeReply,
@@ -104,38 +105,16 @@ export class DiscordBridgeApp {
     }
   }
 
-  async start() {
-    this.acquireLock();
-
-    // Verify Orchestrator API connectivity
-    try {
-      const health = await apiClient.getHealth();
-      console.log(`[DiscordBridge] Connected to CodeOrchestrator at ${this.config.apiUrl} (status: ${health.status})`);
-    } catch (err) {
-      console.warn(`[DiscordBridge] Warning: Could not reach CodeOrchestrator health endpoint: ${err.message}`);
-    }
-
-    if (!this.config.token) {
-      console.warn('[DiscordBridge] DISCORD_BOT_TOKEN is not configured. Standing by in offline mode.');
-      return;
-    }
-
-    this.client = new Client({
-      intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages
-      ]
-    });
-
+  setupClientHandlers(client) {
     this.eventListener = new OrchestratorEventListener(
       apiClient,
       persistence,
-      this.client,
+      client,
       this.config
     );
 
     // Setup Discord interaction router
-    this.client.on('interactionCreate', async (interaction) => {
+    client.on('interactionCreate', async (interaction) => {
       try {
         if (interaction.isChatInputCommand()) {
           if (interaction.commandName === 'code') {
@@ -171,15 +150,72 @@ export class DiscordBridgeApp {
       }
     });
 
-    this.client.once('ready', async (c) => {
+    // Setup natural conversation message handler (mention and reply routing)
+    client.on('messageCreate', async (message) => {
+      try {
+        await handleMessage(message, client, apiClient, persistence, auth);
+      } catch (err) {
+        console.error('[DiscordBridge] Error in natural chat message handler:', err);
+      }
+    });
+
+    let readyHandled = false;
+    const onReady = async (c) => {
+      if (readyHandled) return;
+      readyHandled = true;
       console.log(`[DiscordBridge] Logged in as ${c.user.tag} (ID: ${c.user.id})`);
       // Start real-time event listener
       this.eventListener.start();
       // Register commands
       await this.registerSlashCommands();
-    });
+    };
 
-    await this.client.login(this.config.token);
+    client.once('clientReady', onReady);
+    client.once('ready', onReady);
+  }
+
+  async start() {
+    this.acquireLock();
+    persistence.reconcileRunningMessages();
+
+    // Verify Orchestrator API connectivity
+    try {
+      const health = await apiClient.getHealth();
+      console.log(`[DiscordBridge] Connected to CodeOrchestrator at ${this.config.apiUrl} (status: ${health.status})`);
+    } catch (err) {
+      console.warn(`[DiscordBridge] Warning: Could not reach CodeOrchestrator health endpoint: ${err.message}`);
+    }
+
+    if (!this.config.token) {
+      console.warn('[DiscordBridge] DISCORD_BOT_TOKEN is not configured. Standing by in offline mode.');
+      return;
+    }
+
+    const baseIntents = [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages
+    ];
+
+    const intentsWithContent = [
+      ...baseIntents,
+      GatewayIntentBits.MessageContent
+    ];
+
+    try {
+      this.client = new Client({ intents: intentsWithContent });
+      this.setupClientHandlers(this.client);
+      await this.client.login(this.config.token);
+    } catch (err) {
+      if (err.message && err.message.toLowerCase().includes('disallowed intents')) {
+        console.warn('[DiscordBridge] Warning: GatewayIntentBits.MessageContent is not enabled in Discord Developer Portal (Developer Portal -> Applications -> Bot -> Privileged Gateway Intents -> Message Content Intent).');
+        console.warn('[DiscordBridge] Falling back to standard intents (Guilds, GuildMessages). Mention-based chat remains fully active.');
+        this.client = new Client({ intents: baseIntents });
+        this.setupClientHandlers(this.client);
+        await this.client.login(this.config.token);
+      } else {
+        throw err;
+      }
+    }
   }
 
   async handleButtonInteraction(interaction) {
