@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { statSync, existsSync, rmSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { execSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { PermissionsBitField } from 'discord.js';
 
@@ -809,19 +810,25 @@ test('25. Output > 2000 chars: rendered as sanitized .txt attachment', () => {
 });
 
 test('26. Critical Ballo workspace check: blocks execution when project ballo points to codeorchestrator', () => {
-  const balloWorkspace = process.env.WORKSPACE_ROOT ? join(process.env.WORKSPACE_ROOT, 'ballo') : join(process.env.HOME || '', 'workspace/ballo');
-  const balloProject = {
-    id: 'a78db8a9-3134-4f5f-9719-ecd2fe16c9ec',
-    name: 'ballo',
-    slug: 'ballo',
-    workspace_path: balloWorkspace
-  };
+  const tempDir = mkdtempSync(join(tmpdir(), 'ballo-mismatch-test-'));
+  try {
+    execSync('git init', { cwd: tempDir, stdio: 'pipe' });
+    execSync('git remote add origin https://github.com/lukman-ss/codeorchestrator', { cwd: tempDir, stdio: 'pipe' });
+    const balloProject = {
+      id: 'a78db8a9-3134-4f5f-9719-ecd2fe16c9ec',
+      name: 'ballo',
+      slug: 'ballo',
+      workspace_path: tempDir
+    };
 
-  const check = validateProjectWorkspace(balloProject);
-  assert.equal(check.valid, false);
-  assert.equal(check.mismatch, true);
-  assert.match(check.error, /Repository mismatch detected: Project 'ballo'/);
-  assert.match(check.error, /intended repository is 'https:\/\/github\.com\/lukman-ss\/ballo'/);
+    const check = validateProjectWorkspace(balloProject);
+    assert.equal(check.valid, false);
+    assert.equal(check.mismatch, true);
+    assert.match(check.error, /Repository mismatch detected: Project 'ballo'/);
+    assert.match(check.error, /intended repository is 'https:\/\/github\.com\/lukman-ss\/ballo'/);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('27. Critical Ballo workspace check: does NOT mutate or delete repository checkout on disk', () => {

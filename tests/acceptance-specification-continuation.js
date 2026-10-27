@@ -41,62 +41,59 @@ async function req(path, method = 'GET', body = undefined) {
 
 async function run() {
   console.log('=== Step 1: Ballo Workspace Safety Guard Acceptance Test ===');
-  const balloPath = process.env.WORKSPACE_ROOT
-    ? resolve(process.env.WORKSPACE_ROOT, 'ballo')
-    : resolve(process.env.HOME || '', 'workspace/ballo');
-  let initialBalloRemote = null;
-  if (existsSync(balloPath)) {
-    try {
-      initialBalloRemote = execSync('git config --get remote.origin.url', {
-        cwd: balloPath,
-        encoding: 'utf8'
-      }).trim();
-    } catch {}
-  }
-
-  // 1. Validation endpoint reports mismatch
+  // 1. Repaired Ballo workspace validates successfully
   const valRes = await req('/projects/a78db8a9-3134-4f5f-9719-ecd2fe16c9ec/validate');
   console.log('Ballo validate status:', valRes.status, valRes.body);
   assert.equal(valRes.status, 200);
-  assert.equal(valRes.body.valid, false);
-  assert.equal(valRes.body.mismatch, true);
-  assert.match(valRes.body.error, /Repository mismatch detected/);
+  assert.equal(valRes.body.valid, true);
+  assert.equal(valRes.body.stack, 'Go');
 
-  // 2. Task creation rejected
-  const taskRes = await req('/projects/a78db8a9-3134-4f5f-9719-ecd2fe16c9ec/tasks', 'POST', {
-    prompt: 'Implement Ballo feature'
-  });
-  console.log('Ballo task rejection status:', taskRes.status);
-  assert.notEqual(taskRes.status, 201);
-  assert.match(taskRes.body?.error || '', /Repository mismatch/);
+  // 2. Mismatched workspace guard rejection test fixture
+  const fixtureSlug = 'temp-mismatch-fixture-' + Date.now();
+  const workspaceRoot = process.env.WORKSPACE_ROOT || resolve(process.env.HOME || '', 'workspace');
+  const tempFixtureDir = resolve(workspaceRoot, fixtureSlug);
+  try {
+    execSync('git init ' + tempFixtureDir, { stdio: 'pipe' });
+    execSync('git -C ' + tempFixtureDir + ' remote add origin https://github.com/lukman-ss/codeorchestrator', { stdio: 'pipe' });
+    const importRes = await req('/projects/import', 'POST', {
+      directory: fixtureSlug,
+      name: 'ballo',
+      isTest: 1
+    });
+    assert.equal(importRes.status, 200);
+    const mismatchProjId = importRes.body.id;
 
-  // 3. Multi-agent job rejected
-  const jobRes = await req('/jobs', 'POST', {
-    project_id: 'a78db8a9-3134-4f5f-9719-ecd2fe16c9ec',
-    prompt: 'Implement Ballo multi-agent job'
-  });
-  console.log('Ballo job rejection status:', jobRes.status);
-  assert.notEqual(jobRes.status, 201);
-  assert.match(jobRes.body?.error || '', /Repository mismatch/);
+    const valMismatch = await req(`/projects/${mismatchProjId}/validate`);
+    assert.equal(valMismatch.status, 200);
+    assert.equal(valMismatch.body.valid, false);
+    assert.equal(valMismatch.body.mismatch, true);
+    assert.match(valMismatch.body.error, /Repository mismatch detected/);
 
-  // 4. Project session creation rejected
-  const sessRejectRes = await req('/sessions', 'POST', {
-    projectId: 'a78db8a9-3134-4f5f-9719-ecd2fe16c9ec',
-    title: 'Ballo Session'
-  });
-  console.log('Ballo session rejection status:', sessRejectRes.status);
-  assert.notEqual(sessRejectRes.status, 201);
-  assert.match(sessRejectRes.body?.error || '', /Repository mismatch/);
+    const taskRes = await req(`/projects/${mismatchProjId}/tasks`, 'POST', {
+      prompt: 'Implement feature'
+    });
+    assert.notEqual(taskRes.status, 201);
+    assert.match(taskRes.body?.error || '', /Repository mismatch/);
 
-  // 5. Verify Ballo workspace was NOT mutated or deleted
-  if (existsSync(balloPath)) {
-    const afterRemote = execSync('git config --get remote.origin.url', {
-      cwd: balloPath,
-      encoding: 'utf8'
-    }).trim();
-    assert.equal(afterRemote, initialBalloRemote, 'Ballo remote origin must remain untouched');
+    const jobRes = await req('/jobs', 'POST', {
+      project_id: mismatchProjId,
+      prompt: 'Implement job'
+    });
+    assert.notEqual(jobRes.status, 201);
+    assert.match(jobRes.body?.error || '', /Repository mismatch/);
+
+    const sessRejectRes = await req('/sessions', 'POST', {
+      projectId: mismatchProjId,
+      title: 'Mismatch Session'
+    });
+    assert.notEqual(sessRejectRes.status, 201);
+    assert.match(sessRejectRes.body?.error || '', /Repository mismatch/);
+  } finally {
+    if (existsSync(tempFixtureDir)) {
+      try { rmSync(tempFixtureDir, { recursive: true, force: true }); } catch {}
+    }
   }
-  console.log('✓ Ballo workspace safety checks passed.');
+  console.log('✓ Ballo workspace validation & mismatch safety guards passed.');
 
   console.log('\n=== Step 2: Real OpenCode Continuation on Disposable Project ===');
   const projName = `disposable-spec-${Date.now()}`;

@@ -494,13 +494,23 @@ export const validateProjectWorkspace = (project, options = {}) => {
     const normActual = actualRemote.trim().toLowerCase().replace(/\.git$/, '').replace(/\/+$/, '');
     const normExpected = expectedRepo.trim().toLowerCase().replace(/\.git$/, '').replace(/\/+$/, '');
     if (normActual !== normExpected) {
-      return {
-        valid: false,
-        mismatch: true,
-        error: `Repository mismatch detected: Workspace remote '${actualRemote}' does not match expected repository '${expectedRepo}'.`,
-        actualRemote,
-        expectedRemote: expectedRepo
-      };
+      const checkA = validateGitHubUrl(actualRemote);
+      const checkE = validateGitHubUrl(expectedRepo);
+      const matchOwnerRepo =
+        checkA.valid &&
+        checkE.valid &&
+        checkA.owner?.toLowerCase() === checkE.owner?.toLowerCase() &&
+        checkA.repo?.toLowerCase() === checkE.repo?.toLowerCase();
+
+      if (!matchOwnerRepo) {
+        return {
+          valid: false,
+          mismatch: true,
+          error: `Repository mismatch detected: Workspace remote '${actualRemote}' does not match expected repository '${expectedRepo}'.`,
+          actualRemote,
+          expectedRemote: expectedRepo
+        };
+      }
     }
   }
 
