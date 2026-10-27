@@ -10,8 +10,10 @@ import projects from './routes/projects.js';
 import tasks from './routes/tasks.js';
 import sessions from './routes/sessions.js';
 import jobs from './routes/jobs.js';
+import approvals from './routes/approvals.js';
 import { setupWebSocket, shutdownWebSocket } from './realtime/websocket.js';
 import { registerJobRoutes } from './routes/job-routes.js';
+import { WorkflowService } from './services/workflow-service.js';
 import logger from './logger.js';
 
 if (REQUIRE_AUTH && !API_AUTH_TOKEN) {
@@ -58,6 +60,7 @@ fastify.register(projects, { prefix: '/projects' });
 fastify.register(tasks, { prefix: '/tasks' });
 fastify.register(sessions, { prefix: '/sessions' });
 fastify.register(jobs);
+fastify.register(approvals);
 registerJobRoutes(fastify);
 
 const server = fastify.server;
@@ -67,6 +70,7 @@ initDb();
 recoverOperations();
 recoverSessions();
 recoverRunning();
+WorkflowService.recoverPendingWorkflows();
 scheduleCleanup();
 setInterval(cleanupTaskLogs, 24 * 3600 * 1000);
 startFromQueue();

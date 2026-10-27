@@ -166,6 +166,20 @@ export const init = () => {
     db.exec("UPDATE projects SET repository_url = repo_url WHERE repository_url IS NULL AND repo_url IS NOT NULL;");
   }
 
+  const taskCols = db.prepare('PRAGMA table_info(tasks)').all();
+  if (taskCols.length > 0) {
+    const colNames = new Set(taskCols.map(c => c.name));
+    if (!colNames.has('workflow_status')) db.exec("ALTER TABLE tasks ADD COLUMN workflow_status TEXT DEFAULT 'queued';");
+    if (!colNames.has('execution_status')) db.exec("ALTER TABLE tasks ADD COLUMN execution_status TEXT DEFAULT 'queued';");
+  }
+
+  const jobCols = db.prepare('PRAGMA table_info(jobs)').all();
+  if (jobCols.length > 0) {
+    const colNames = new Set(jobCols.map(c => c.name));
+    if (!colNames.has('workflow_status')) db.exec("ALTER TABLE jobs ADD COLUMN workflow_status TEXT DEFAULT 'pending';");
+    if (!colNames.has('execution_status')) db.exec("ALTER TABLE jobs ADD COLUMN execution_status TEXT DEFAULT 'pending';");
+  }
+
   initMigrations();
   const txMigrations = db.transaction(() => {
     for (const sql of allMigrations) db.exec(sql);

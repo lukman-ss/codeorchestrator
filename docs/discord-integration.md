@@ -122,6 +122,15 @@ All commands are organized under the `/code` command group:
 #### `/code report id:<id>`
 - Retrieves the full final execution summary, files modified, and test verification report.
 
+#### `/code approvals [project:<name>]`
+- Lists pending Git approval requests awaiting human review across projects.
+
+#### `/code review id:<id>`
+- Displays the 3-gate review card for a task or job, showing Gate 1 (Verification), Gate 2 (Security Audit), and Gate 3 (Git Review) with interactive `[Push to GitHub]`, `[Keep Local]`, and `[Reject]` buttons.
+
+#### `/code approve id:<id> decision:<push|keep_local|reject>`
+- Submits an explicit human approval decision directly via slash command.
+
 #### `/code cancel id:<id> [confirm:True]`
 - Idempotently cancels an active task or job. Requires explicit `confirm:True`.
 
@@ -202,3 +211,32 @@ To overcome Discord's 2,000-character single-message ceiling for rich specificat
 - **Identity & Remote Verification**: Before running tasks, multi-agent jobs, or creating project sessions, the backend verifies that the local workspace git remote origin matches the registered project identity.
 - **Ballo Protection**: Project `ballo` requires its intended Go repository `https://github.com/lukman-ss/ballo`. If the local workspace points to `codeorchestrator` or any non-Ballo repository, execution is blocked immediately without filesystem mutation or checkout deletion.
 - **Safe Repair Workflow**: When remotes or project configurations change, administrators can invoke `/code project repair project:<id> confirm:True [repourl:<url>]` to update database metadata cleanly without altering or deleting existing files on disk.
+
+---
+
+## 8. Completion Gates & Interactive Git Reviews
+
+Before tasks or multi-agent jobs reach `completed` status, the backend executes three mandatory gates:
+- **Gate 1 (Implementation Verification)**: Validates syntax, lints, and executes test suites.
+- **Gate 2 (Independent Security Audit)**: Scans diffs for credentials, tokens, internal IP leaks, and `/home/<user>` paths.
+- **Gate 3 (Git Review & Human Approval)**: Identifies task-owned modified files and requests human confirmation.
+
+### Realtime Review Notifications
+When a workflow enters `awaiting_approval`:
+1. CodeOrchestrator emits `approval.requested` over WebSocket.
+2. The Discord Event Listener catches the event and renders an interactive **Git Review & Human Approval** card into the originating channel.
+3. The embed displays:
+   - Target Project & Remote Repository
+   - Git Branch & Proposed Commit Message
+   - Files Changed (additions, modifications, deletions)
+   - Gate 1 & Gate 2 Pass Status & Findings
+   - Action buttons:
+     - `[Push to GitHub]` (`btn_git_push_<id>`): Commits task-owned files and pushes non-interactively to the configured remote.
+     - `[Keep Local]` (`btn_git_keeplocal_<id>`): Preserves workspace files on disk without committing or pushing, completing the workflow.
+     - `[Reject]` (`btn_git_reject_<id>`): Marks the workflow failed and discards the pending approval.
+
+### Safety & Idempotency Guarantees
+- **Standalone Sessions & Zero Changes**: Tasks without workspace file changes complete cleanly with `noChanges: true` without prompting Git push.
+- **Task Ownership Only**: Git commit and push stage only task-owned files (never `git add .` or `git add -A`).
+- **Remote Divergence**: Rejects pushes when remote has diverged without force-pushing.
+- **Replay Protection**: Decided approvals transition to terminal states (`approved_pushed`, `approved_local`, `rejected`) and cannot be replayed.

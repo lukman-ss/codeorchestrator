@@ -10,10 +10,21 @@ stateDiagram-v2
     queued --> running: Capacity available (Global & Project limits)
     queued --> cancelled: POST /tasks/:id/cancel
     
-    running --> completed: Exit code 0
-    running --> failed: Exit code != 0 or spawn error
-    running --> cancelled: POST /tasks/:id/cancel (SIGTERM -> SIGKILL)
+    running --> failed: Execution error / Non-zero exit
+    running --> cancelled: POST /tasks/:id/cancel
     running --> interrupted: Server crash or shutdown
+    
+    running --> verifying: Execution exit 0 (Project Task)
+    running --> completed: Execution exit 0 (Standalone / No changes)
+    
+    verifying --> auditing: Gate 1 Passed (Implementation Verification)
+    verifying --> failed: Gate 1 Failed
+    
+    auditing --> awaiting_approval: Gate 2 Passed (Security Audit)
+    auditing --> failed: Gate 2 Failed (Critical/High findings)
+    
+    awaiting_approval --> completed: Gate 3 Decision (push / keep_local)
+    awaiting_approval --> failed: Gate 3 Decision (reject)
     
     completed --> [*]
     failed --> [*]
@@ -23,14 +34,19 @@ stateDiagram-v2
 
 ## State Definitions
 
-| State | Description |
-|---|---|
-| `queued` | Task is stored in SQLite and added to the in-memory dispatch queue. Awaiting worker capacity. |
-| `running` | OpenCode subprocess has been spawned (`opencode --auto --pure --format json <prompt>`). PID recorded. |
-| `completed` | The subprocess exited normally with return code `0`. All generated files are in the workspace. |
-| `failed` | The subprocess exited with a non-zero code or failed to spawn. Error output captured in `tasks.error`. |
-| `cancelled` | Execution was explicitly stopped via `POST /tasks/:id/cancel` before natural completion. |
-| `interrupted` | The orchestrator server shut down or crashed while the task was active. Reconciled on restart. |
+Tasks maintain dual status tracking: `execution_status` (raw OpenCode subprocess execution) and `workflow_status` (overall multi-gate completion status).
+
+| Workflow State | Execution State | Description |
+|---|---|---|
+| `queued` | `queued` | Task is stored in SQLite and added to the in-memory dispatch queue awaiting worker capacity. |
+| `running` | `running` | OpenCode subprocess has been spawned (`opencode --auto --pure --format json <prompt>`). PID recorded. |
+| `verifying` | `completed` | Subprocess finished. Gate 1 (ImplementationVerifier) is running syntax checks, lints, and test suites. |
+| `auditing` | `completed` | Gate 1 passed. Gate 2 (SecurityAuditor) is performing deterministic secrets scanning and leak checks. |
+| `awaiting_approval` | `completed` | Gates 1 & 2 passed. Gate 3 (ApprovalService) created a pending Git approval awaiting human decision. |
+| `completed` | `completed` | All gates passed and human decided `push` or `keep_local` (or task completed with zero changes). |
+| `failed` | `failed` | The subprocess failed, an automated gate failed, or human rejected the approval. Captured in `tasks.error`. |
+| `cancelled` | `cancelled` | Execution was explicitly stopped via `POST /tasks/:id/cancel` before natural completion. |
+| `interrupted` | `interrupted` | The orchestrator server shut down or crashed while active. Reconciled on restart. |
 
 ## Concurrency and Scheduling
 

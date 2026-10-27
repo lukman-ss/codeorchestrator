@@ -3,6 +3,7 @@ import config from './config.js';
 import {
   formatJobCard,
   formatTaskCard,
+  formatGitReviewCard,
   redactSensitive,
   safeMentions,
   safeMessageEdit,
@@ -169,15 +170,16 @@ export class OrchestratorEventListener {
     if (!ev || !ev.type) return;
 
     const eventType = ev.type || ev.eventType;
-    const taskId = ev.taskId || (ev.subtask && !ev.subtask.job_id ? ev.subtask.id : null);
-    const jobId = ev.jobId || ev.subtask?.job_id || ev.payload?.job_id || ev.data?.job_id;
-    const sessionId = ev.sessionId || ev.payload?.sessionId || ev.data?.sessionId;
+    const payload = ev.payload || ev.data || {};
+    const taskId = ev.taskId || payload.taskId || (ev.subtask && !ev.subtask.job_id ? ev.subtask.id : null);
+    const jobId = ev.jobId || payload.jobId || payload.job_id || ev.subtask?.job_id;
+    const sessionId = ev.sessionId || payload.sessionId;
 
     const id = jobId || taskId || sessionId || ev.id;
     if (!id) return;
 
     // Deduplication check
-    const dedupKey = `${eventType}:${id}:${ev.sequence ?? ev.timestamp ?? JSON.stringify(ev.payload || ev.data || '')}`;
+    const dedupKey = `${eventType}:${id}:${ev.sequence ?? ev.timestamp ?? JSON.stringify(payload || '')}`;
     if (this.isDuplicate(dedupKey)) {
       return;
     }
@@ -222,6 +224,33 @@ export class OrchestratorEventListener {
       } else if (eventType === 'job.blocked') {
         newStatus = 'blocked';
         latestEventText = 'Job blocked by dependency or retries';
+      } else if (eventType.startsWith('verification.')) {
+        newStatus = 'verifying';
+        latestEventText = eventType === 'verification.passed' ? 'Gate 1 (Verification) PASSED' : (eventType === 'verification.failed' ? 'Gate 1 (Verification) FAILED' : 'Gate 1: Verifying implementation...');
+      } else if (eventType.startsWith('security.audit.')) {
+        newStatus = 'auditing';
+        latestEventText = eventType === 'security.audit.passed' ? 'Gate 2 (Security Audit) PASSED' : (eventType === 'security.audit.failed' ? 'Gate 2 (Security Audit) BLOCKED' : 'Gate 2: Scanning secrets and credentials...');
+      } else if (eventType === 'git.review.started') {
+        newStatus = 'git_review';
+        latestEventText = 'Gate 3: Preparing Git review';
+      } else if (eventType === 'git.review.ready' || eventType === 'approval.requested') {
+        newStatus = 'awaiting_approval';
+        latestEventText = 'Gate 3: Awaiting human approval';
+      } else if (eventType === 'git.push.started') {
+        newStatus = 'pushing';
+        latestEventText = 'Pushing approved changes to GitHub';
+      } else if (eventType === 'git.push.completed') {
+        newStatus = 'completed';
+        latestEventText = 'Git push complete';
+      } else if (eventType === 'git.push.failed') {
+        newStatus = 'failed';
+        latestEventText = `Git push failed: ${payload.error || 'error'}`;
+      } else if (eventType === 'workflow.blocked') {
+        newStatus = 'blocked';
+        latestEventText = `Workflow blocked: ${payload.reason || 'checks failed'}`;
+      } else if (eventType === 'workflow.completed') {
+        newStatus = 'completed';
+        latestEventText = payload.noChanges ? 'Workflow completed (no files changed)' : 'Workflow completed';
       }
 
       this.persistence.updateExecution(id, {
@@ -229,6 +258,20 @@ export class OrchestratorEventListener {
         lastEventSequence: ev.sequence ?? exec.last_event_sequence,
         lastEventId: dedupKey
       });
+
+      // If approval requested, send approval card with interactive buttons
+      if ((eventType === 'approval.requested' || eventType === 'git.review.ready') && payload.approvalId && this.discordClient?.channels) {
+        try {
+          const approval = await this.apiClient.getApproval(payload.approvalId);
+          if (approval) {
+            const channel = await this.discordClient.channels.fetch(exec.channel_id).catch(() => null);
+            if (channel) {
+              const card = formatGitReviewCard(approval);
+              await safeChannelSend(channel, card, { type: 'git_review_ready' });
+            }
+          }
+        } catch {}
+      }
 
       // Fetch fresh job details and schedule update
       try {
@@ -263,6 +306,33 @@ export class OrchestratorEventListener {
       } else if (eventType === 'task.cancelled') {
         newStatus = 'cancelled';
         latestEventText = 'Task cancelled';
+      } else if (eventType.startsWith('verification.')) {
+        newStatus = 'verifying';
+        latestEventText = eventType === 'verification.passed' ? 'Gate 1 (Verification) PASSED' : (eventType === 'verification.failed' ? 'Gate 1 (Verification) FAILED' : 'Gate 1: Verifying implementation...');
+      } else if (eventType.startsWith('security.audit.')) {
+        newStatus = 'auditing';
+        latestEventText = eventType === 'security.audit.passed' ? 'Gate 2 (Security Audit) PASSED' : (eventType === 'security.audit.failed' ? 'Gate 2 (Security Audit) BLOCKED' : 'Gate 2: Scanning secrets and credentials...');
+      } else if (eventType === 'git.review.started') {
+        newStatus = 'git_review';
+        latestEventText = 'Gate 3: Preparing Git review';
+      } else if (eventType === 'git.review.ready' || eventType === 'approval.requested') {
+        newStatus = 'awaiting_approval';
+        latestEventText = 'Gate 3: Awaiting human approval';
+      } else if (eventType === 'git.push.started') {
+        newStatus = 'pushing';
+        latestEventText = 'Pushing approved changes to GitHub';
+      } else if (eventType === 'git.push.completed') {
+        newStatus = 'completed';
+        latestEventText = 'Git push complete';
+      } else if (eventType === 'git.push.failed') {
+        newStatus = 'failed';
+        latestEventText = `Git push failed: ${payload.error || 'error'}`;
+      } else if (eventType === 'workflow.blocked') {
+        newStatus = 'blocked';
+        latestEventText = `Workflow blocked: ${payload.reason || 'checks failed'}`;
+      } else if (eventType === 'workflow.completed') {
+        newStatus = 'completed';
+        latestEventText = payload.noChanges ? 'Workflow completed (no files changed)' : 'Workflow completed';
       }
 
       this.persistence.updateExecution(id, {
@@ -270,6 +340,20 @@ export class OrchestratorEventListener {
         lastEventSequence: ev.sequence ?? exec.last_event_sequence,
         lastEventId: dedupKey
       });
+
+      // If approval requested, send approval card with interactive buttons
+      if ((eventType === 'approval.requested' || eventType === 'git.review.ready') && payload.approvalId && this.discordClient?.channels) {
+        try {
+          const approval = await this.apiClient.getApproval(payload.approvalId);
+          if (approval) {
+            const channel = await this.discordClient.channels.fetch(exec.channel_id).catch(() => null);
+            if (channel) {
+              const card = formatGitReviewCard(approval);
+              await safeChannelSend(channel, card, { type: 'git_review_ready' });
+            }
+          }
+        } catch {}
+      }
 
       try {
         const task = await this.apiClient.getTask(id);
@@ -382,16 +466,6 @@ export class OrchestratorEventListener {
           content,
           allowedMentions: safeMentions
         }, { type: 'progress_card' });
-      }
-
-      // If terminal, send final completion notification if requested
-      if (isTerminal) {
-        const terminalStatus = (exec.status || '').toUpperCase();
-        const notification = `Execution \`${id}\` reached terminal state: **${terminalStatus}**`;
-        await safeChannelSend(channel, {
-          content: notification,
-          allowedMentions: safeMentions
-        }, { type: 'terminal_notification' }).catch(() => {});
       }
     } catch {}
   }

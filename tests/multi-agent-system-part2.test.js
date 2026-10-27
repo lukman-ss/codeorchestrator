@@ -86,9 +86,13 @@ test('Test H: Dependency Scheduling', async () => {
     model: '9router/ayce-combo'
   });
 
-  await new Promise(r => setTimeout(r, 30000));
+  let baseStatus;
+  for (let i = 0; i < 25; i++) {
+    await new Promise(r => setTimeout(r, 2000));
+    baseStatus = (await req(`/tasks/${baseTask.body.id}`)).body.status;
+    if (['completed', 'failed'].includes(baseStatus)) break;
+  }
 
-  const baseStatus = (await req(`/tasks/${baseTask.body.id}`)).body.status;
   assert.ok(['completed', 'failed'].includes(baseStatus));
 });
 

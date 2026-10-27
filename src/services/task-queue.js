@@ -10,10 +10,13 @@ import { statSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import logger from '../logger.js';
 import { eventBus } from '../realtime/event-bus.js';
+import { GitOperations } from './git-operations.js';
+import { WorkflowService } from './workflow-service.js';
 
 const emitter = new EventEmitter();
 const processes = new Map();
 const buffers = new Map();
+const taskBaselines = new Map();
 const BUFFER_SIZE = 200;
 const dispatchQueue = [];
 
@@ -102,6 +105,9 @@ const runTask = (task) => {
   
   const workspace = join(WORKSPACE_ROOT, dbGetOne('SELECT slug FROM projects WHERE id=?', [task.project_id]).slug);
   mkdirSync(workspace, { recursive: true });
+  try {
+    taskBaselines.set(task.id, GitOperations.captureBaseline(workspace));
+  } catch {}
   const child = spawn(OPENCODE_BIN, args, {
     cwd: workspace,
     env,
@@ -116,7 +122,7 @@ const runTask = (task) => {
   processes.set(task.id, child);
   globalRunning++;
   const taskLogger = new TaskLogger(task.id);
-  dbRun("UPDATE tasks SET status='running', pid=?, started_at=datetime('now'), updated_at=datetime('now') WHERE id=?", [child.pid, task.id]);
+  dbRun("UPDATE tasks SET status='running', execution_status='running', workflow_status='running', pid=?, started_at=datetime('now'), updated_at=datetime('now') WHERE id=?", [child.pid, task.id]);
   emitPersisted(task.id, 'task.started', { pid: child.pid, args });
   emitPersisted(task.id, 'task.progress', { state: 'spawned' });
 
@@ -168,20 +174,39 @@ const runTask = (task) => {
   });
   child.on('error', (err) => {
     taskLogger.end();
-    finish(task.id, 'failed', err.message, child.pid, null);
+    finish(task, 'failed', err.message, child.pid, null);
   });
   child.on('exit', (code) => {
     taskLogger.end();
-    finish(task.id, code === 0 ? 'completed' : 'failed', code !== 0 ? `Exit code ${code}` : null, child.pid, code);
+    finish(task, code === 0 ? 'completed' : 'failed', code !== 0 ? `Exit code ${code}` : null, child.pid, code);
   });
 };
 
-const finish = (id, status, error, pid, code) => {
+const finish = (task, status, error, pid, code) => {
+  const id = typeof task === 'object' && task ? task.id : task;
+  const taskObj = typeof task === 'object' && task ? task : dbGetOne('SELECT * FROM tasks WHERE id = ?', [id]);
   processes.delete(id);
   globalRunning--;
-  dbRun("UPDATE tasks SET status=?, error=?, exit_code=?, finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?",
-    [status, error, code, id]);
-  emitPersisted(id, status === 'completed' ? 'task.completed' : 'task.failed', { exitCode: code, error });
+
+  const baseline = taskBaselines.get(id);
+  taskBaselines.delete(id);
+
+  const isCompleted = status === 'completed';
+  const workflowStatus = isCompleted ? (taskObj?.project_id ? 'verifying' : 'completed') : 'failed';
+
+  dbRun("UPDATE tasks SET status=?, execution_status=?, workflow_status=?, error=?, exit_code=?, finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?",
+    [status, status, workflowStatus, error, code, id]);
+  emitPersisted(id, isCompleted ? 'task.completed' : 'task.failed', { exitCode: code, error });
+
+  if (isCompleted && taskObj?.project_id) {
+    WorkflowService.startCompletionWorkflow({
+      taskId: id,
+      projectId: taskObj.project_id,
+      prompt: taskObj.prompt,
+      baseline
+    }).catch(err => logger.error({ taskId: id, err: err.message }, 'Workflow execution error'));
+  }
+
   schedule();
 };
 

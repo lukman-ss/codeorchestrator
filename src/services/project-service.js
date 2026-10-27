@@ -261,7 +261,31 @@ export const createProject = ({
       }
       cloneArgs.push('--', effectiveRepoUrl, workspacePath);
 
-      runGit(cloneArgs);
+      try {
+        runGit(cloneArgs);
+      } catch (cloneErr) {
+        // Empty repos on GitHub/Git hosts have no branches yet, fallback to branchless clone
+        if (effectiveBranch && /Remote branch .* not found/i.test(cloneErr.raw || cloneErr.message)) {
+          if (existsSync(workspacePath)) {
+            rmSync(workspacePath, { recursive: true, force: true });
+          }
+          runGit(['clone', '--config', 'core.hooksPath=/dev/null', '--', effectiveRepoUrl, workspacePath]);
+          let hasCommits = true;
+          try {
+            runGit(['-C', workspacePath, 'rev-parse', '--verify', 'HEAD']);
+          } catch {
+            hasCommits = false;
+          }
+          if (!hasCommits) {
+            runGit(['-C', workspacePath, 'checkout', '-B', effectiveBranch]);
+            finalBranch = effectiveBranch;
+          } else {
+            throw cloneErr;
+          }
+        } else {
+          throw cloneErr;
+        }
+      }
 
       // Verify clone succeeded and .git exists
       if (!existsSync(join(workspacePath, '.git'))) {
@@ -272,7 +296,11 @@ export const createProject = ({
       if (!finalBranch) {
         try {
           finalBranch = runGit(['-C', workspacePath, 'rev-parse', '--abbrev-ref', 'HEAD']);
-        } catch {}
+        } catch {
+          try {
+            finalBranch = runGit(['-C', workspacePath, 'symbolic-ref', '--short', 'HEAD']);
+          } catch {}
+        }
       }
 
       detectedStack = detectTechnologyStack(workspacePath);
@@ -282,8 +310,8 @@ export const createProject = ({
       createdWorkspace = true;
 
       if (initGit) {
-        runGit(['-C', workspacePath, 'init', '--quiet']);
-        finalBranch = 'main';
+        runGit(['-C', workspacePath, 'init', '-b', effectiveBranch || 'main', '--quiet']);
+        finalBranch = effectiveBranch || 'main';
       }
     }
 

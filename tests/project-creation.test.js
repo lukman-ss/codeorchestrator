@@ -471,3 +471,35 @@ test('30. Server Restart Recovery: recovers pending operations by marking them f
   assert.equal(recovered.status, 'failed');
   assert.equal(recovered.error, 'Operation interrupted by server restart');
 });
+
+// 31. Project Creation accepts null branch and repoUrl without validation error
+test('31. Project Creation accepts null branch and repoUrl without validation error', async () => {
+  const res = await req('/projects', 'POST', {
+    name: 'Null Branch Project',
+    branch: null,
+    repoUrl: null,
+    isTest: 1
+  });
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.default_branch, 'main');
+});
+
+// 32. Mode B Clone: empty remote repo with branch 'main' initializes branch without error
+test('32. Mode B Clone: empty remote repo with branch \'main\' initializes branch without error', async () => {
+  const emptyFixtureDir = join(serverContext.workspaceRoot, 'empty-fixture-origin.git');
+  spawnSync('git', ['init', '--bare', emptyFixtureDir], { stdio: 'ignore' });
+
+  const slug = `empty-cloned-test-${Date.now()}`;
+  const res = await req('/projects', 'POST', {
+    name: 'Empty Cloned Project',
+    slug,
+    repoUrl: emptyFixtureDir,
+    branch: 'main',
+    isTest: 1
+  });
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.default_branch, 'main');
+  assert.ok(existsSync(join(res.body.workspace_path, '.git')));
+});

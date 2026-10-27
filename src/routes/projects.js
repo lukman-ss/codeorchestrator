@@ -6,21 +6,28 @@ import * as po from '../services/project-operations.js';
 import { enqueueTask } from '../services/task-queue.js';
 import { MAX_PROMPT_LENGTH } from '../config.js';
 
+const formatError = (e) => {
+  if (e instanceof z.ZodError) {
+    return e.issues.map((i) => `${i.path.join('.') || 'input'}: ${i.message}`).join(', ');
+  }
+  return e.message;
+};
+
 const projectSchema = z.object({
   name: z.string().min(1),
-  slug: z.string().regex(/^[a-z0-9-]+$/).optional(),
-  description: z.string().optional(),
-  repoUrl: z.string().optional(),
-  repositoryUrl: z.string().optional(),
-  branch: z.string().optional(),
-  defaultBranch: z.string().optional(),
-  defaultModel: z.string().optional(),
-  initGit: z.boolean().optional(),
-  isTest: z.union([z.boolean(), z.number()]).optional(),
-  userId: z.string().optional(),
-  creatorUserId: z.string().optional(),
-  metadata: z.record(z.any()).optional(),
-  async: z.boolean().optional()
+  slug: z.string().regex(/^[a-z0-9-]+$/).nullish(),
+  description: z.string().nullish(),
+  repoUrl: z.string().nullish(),
+  repositoryUrl: z.string().nullish(),
+  branch: z.string().nullish(),
+  defaultBranch: z.string().nullish(),
+  defaultModel: z.string().nullish(),
+  initGit: z.boolean().nullish(),
+  isTest: z.union([z.boolean(), z.number()]).nullish(),
+  userId: z.string().nullish(),
+  creatorUserId: z.string().nullish(),
+  metadata: z.record(z.any()).nullish(),
+  async: z.boolean().nullish()
 });
 
 const taskSchema = z.object({
@@ -30,7 +37,7 @@ const taskSchema = z.object({
 });
 
 const projectSessionSchema = z.object({
-  title: z.string().optional(),
+  title: z.string().nullish(),
   model: z.string().nullish(),
   userId: z.string().nullish(),
   metadata: z.record(z.any()).nullish()
@@ -56,7 +63,7 @@ export default async function projects(app) {
       const project = ps.createProject({ ...data, isTest: isTestFlag });
       reply.code(201).send(project);
     } catch (e) {
-      reply.code(400).send({ error: e.message });
+      reply.code(400).send({ error: formatError(e) });
     }
   });
 
@@ -141,7 +148,7 @@ export default async function projects(app) {
       enqueueTask(task.id);
       reply.code(201).send({ id: task.id, status: task.status });
     } catch (e) {
-      reply.code(400).send({ error: e.message });
+      reply.code(400).send({ error: formatError(e) });
     }
   });
 
@@ -165,7 +172,7 @@ export default async function projects(app) {
       });
       reply.code(201).send(session);
     } catch (e) {
-      reply.code(e.message === 'Project not found' ? 404 : 400).send({ error: e.message });
+      reply.code(e.message === 'Project not found' ? 404 : 400).send({ error: formatError(e) });
     }
   });
 }

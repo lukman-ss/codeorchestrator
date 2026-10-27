@@ -397,6 +397,7 @@ export async function safeChannelSend(channel, rawPayload, options = {}) {
     msg = await channel.send(primaryPayload);
   } catch (err) {
     console.error(`[DiscordBridge] channel.send failed: ${err.message}`);
+    if (err?.code === 50001 || err?.message?.includes('Missing Access')) return null;
     try {
       msg = await channel.send({
         content: '❌ Error: Notification exceeds limit or failed to render.',
@@ -425,6 +426,9 @@ export async function safeMessageEdit(message, rawPayload, options = {}) {
     return await message.edit(primaryPayload);
   } catch (err) {
     console.error(`[DiscordBridge] message.edit failed: ${err.message}`);
+    if (err?.code === 50001 || err?.code === 10008 || err?.message?.includes('Missing Access') || err?.message?.includes('Unknown Message')) {
+      return null;
+    }
     try {
       return await message.edit({
         content: '⚠️ Progress card update failed.',

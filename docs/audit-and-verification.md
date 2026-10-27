@@ -52,6 +52,36 @@ Audits are persisted in the `agent_audits` table:
 
 ---
 
+## Three Completion Gates Pipeline
+
+Before marking any single task or multi-agent job `completed`, the system coordinates through `WorkflowService`:
+
+### Gate 1: Implementation Verification (`ImplementationVerifier`)
+- Automatically detects the workspace technology stack (Node.js, Go, Rust, Python, etc.).
+- Runs stack-specific syntax validation (`node -c`, `go vet`, `cargo check`, `python -m py_compile`).
+- Identifies and runs automated test suites (`npm test`, `go test`, `cargo test`, `pytest`).
+- Validates prompt criteria and acceptance rules against execution logs and outputs.
+- Any syntax failure or test error halts the workflow in `failed` status.
+
+### Gate 2: Independent Security Audit (`SecurityAuditor`)
+- Analyzes git diffs of task-modified files.
+- Deterministic scanner inspects for leaked secrets, API keys (synthetic AWS keys, GitHub tokens, generic API keys), private keys, internal IP disclosures (`10.x.x.x`, `192.168.x.x`, `172.16-31.x.x`), and host path disclosures (`/home/<user>`).
+- Redacts sensitive evidence strings (`AWS_ACCESS_KEY_ID: [REDACTED]`) before database storage or Discord rendering.
+- Evaluates external scanners (e.g. Gitleaks) when installed; explicitly tracks limitations if toolchains are absent.
+- Blocks workflows on `CRITICAL` or `HIGH` findings.
+
+### Gate 3: Git Review & Human Approval (`ApprovalService` & `GitOperations`)
+- Baseline difference tracking isolates strictly task-owned changes from other workspace modifications.
+- Enforces repository identity validation: checks remote URL against registered project metadata, preventing accidental pushes across repos (such as `ballo` workspace mismatch guards).
+- Never executes `git add .` or `git add -A`. Only task-owned files are staged.
+- Requires explicit human authorization via Discord interactive buttons or `/code approve` / `/code review`:
+  - **Push to GitHub**: Stages task-owned files, commits with structured message, and executes non-interactive push (`GIT_TERMINAL_PROMPT=0`). Blocks on remote divergence.
+  - **Keep Local**: Preserves modifications on disk without committing or pushing, transitioning the workflow cleanly to `completed`.
+  - **Reject**: Aborts the workflow without pushing.
+- Workflows with 0 modified files (or standalone sessions) complete cleanly without generating empty Git commits.
+
+---
+
 ## Repair Loop & Termination
 
 When an audit returns `FAILED`:

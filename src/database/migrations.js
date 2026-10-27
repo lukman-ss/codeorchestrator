@@ -169,7 +169,113 @@ export const migrations = [
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
-  `CREATE INDEX IF NOT EXISTS idx_project_operations_status ON project_operations(status)`
+  `CREATE INDEX IF NOT EXISTS idx_project_operations_status ON project_operations(status)`,
+
+  `CREATE TABLE IF NOT EXISTS workflow_reviews (
+    id TEXT PRIMARY KEY,
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    job_id TEXT REFERENCES jobs(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    reviewed_revision TEXT,
+    acceptance_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(acceptance_status IN ('PENDING','PASS','FAILED','REPAIR_REQUIRED','BLOCKED')),
+    security_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(security_status IN ('PENDING','RUNNING','PASS','BLOCKED','INCOMPLETE')),
+    git_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(git_status IN ('PENDING','READY','AWAITING_APPROVAL','PUSHING','PUSH_SUCCESS','PUSH_FAILED','LOCAL_PRESERVED','NO_CHANGES')),
+    workflow_status TEXT NOT NULL DEFAULT 'running',
+    report_json TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_workflow_reviews_task ON workflow_reviews(task_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_workflow_reviews_job ON workflow_reviews(job_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_workflow_reviews_project ON workflow_reviews(project_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_workflow_reviews_status ON workflow_reviews(workflow_status)`,
+
+  `CREATE TABLE IF NOT EXISTS security_audits (
+    id TEXT PRIMARY KEY,
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    job_id TEXT REFERENCES jobs(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    reviewed_revision TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('PENDING','RUNNING','PASS','BLOCKED','INCOMPLETE')),
+    severity_summary_json TEXT NOT NULL DEFAULT '{}',
+    scanners_executed_json TEXT NOT NULL DEFAULT '[]',
+    limitations_json TEXT NOT NULL DEFAULT '[]',
+    report_location TEXT,
+    report_json TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_security_audits_task ON security_audits(task_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_security_audits_job ON security_audits(job_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_security_audits_status ON security_audits(status)`,
+
+  `CREATE TABLE IF NOT EXISTS security_findings (
+    id TEXT PRIMARY KEY,
+    audit_id TEXT NOT NULL REFERENCES security_audits(id) ON DELETE CASCADE,
+    category TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK(severity IN ('CRITICAL','HIGH','MEDIUM','LOW','INFO')),
+    file_path TEXT NOT NULL,
+    line_number INTEGER,
+    finding_status TEXT NOT NULL DEFAULT 'open' CHECK(finding_status IN ('open','remediated','accepted','false_positive')),
+    evidence_reference TEXT NOT NULL,
+    explanation TEXT NOT NULL,
+    remediation_recommendation TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_security_findings_audit ON security_findings(audit_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_security_findings_severity ON security_findings(severity)`,
+
+  `CREATE TABLE IF NOT EXISTS git_approval_requests (
+    id TEXT PRIMARY KEY,
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    job_id TEXT REFERENCES jobs(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    repository_identity TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    base_revision TEXT,
+    reviewed_revision TEXT NOT NULL,
+    audit_id TEXT REFERENCES security_audits(id),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved_push','approved_keep_local','rejected','invalidated','cancelled')),
+    diff_summary_json TEXT NOT NULL DEFAULT '{}',
+    files_changed_json TEXT NOT NULL DEFAULT '[]',
+    proposed_commit_message TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    invalidated_at TEXT,
+    invalidation_reason TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_git_approval_requests_task ON git_approval_requests(task_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_git_approval_requests_job ON git_approval_requests(job_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_git_approval_requests_status ON git_approval_requests(status)`,
+
+  `CREATE TABLE IF NOT EXISTS git_approval_decisions (
+    id TEXT PRIMARY KEY,
+    approval_request_id TEXT NOT NULL REFERENCES git_approval_requests(id) ON DELETE CASCADE,
+    discord_user_id TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK(decision IN ('push','keep_local','reject')),
+    decision_timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_git_approval_decisions_req ON git_approval_decisions(approval_request_id)`,
+
+  `CREATE TABLE IF NOT EXISTS git_operations (
+    id TEXT PRIMARY KEY,
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    job_id TEXT REFERENCES jobs(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    approval_request_id TEXT REFERENCES git_approval_requests(id),
+    operation TEXT NOT NULL CHECK(operation IN ('commit_and_push','keep_local','revalidate')),
+    remote TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    commit_sha TEXT,
+    status TEXT NOT NULL CHECK(status IN ('pending','running','success','failed')),
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_git_operations_task ON git_operations(task_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_git_operations_job ON git_operations(job_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_git_operations_status ON git_operations(status)`
 ];
 
-export const currentSchemaVersion = 3;
+export const currentSchemaVersion = 4;

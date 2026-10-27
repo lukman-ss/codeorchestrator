@@ -9,6 +9,7 @@ import { MAX_REPAIR_ATTEMPTS } from '../config.js';
 import { OPENCODE_BIN, NINEROUTER_API_KEY, DEFAULT_MODEL, INTEGRATION_MODEL_OVERRIDE } from '../config.js';
 import logger from '../logger.js';
 import { Supervisor } from './supervisor.js';
+import { WorkflowService } from './workflow-service.js';
 
 export class RepairAgent {
   static async attemptRepair(subtask) {
@@ -312,12 +313,29 @@ Determine if the job should be marked COMPLETE or PARTIALLY_COMPLETED.`;
         report
       });
 
-      dbRun(
-        `UPDATE jobs SET status = ?, final_audit_verdict = ?, verified_requirements = ?, completion_percent = ?, report_json = ?, finished_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`,
-        [finalVerdict === 'PASS' ? 'completed' : 'partially_completed', finalVerdict, passedCount, completionPercent, reportJson, jobId]
-      );
+      if (finalVerdict === 'PASS' && job.project_id) {
+        dbRun(
+          `UPDATE jobs SET execution_status = 'completed', workflow_status = 'verifying', final_audit_verdict = ?, verified_requirements = ?, completion_percent = ?, report_json = ?, finished_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`,
+          [finalVerdict, passedCount, completionPercent, reportJson, jobId]
+        );
 
-      emitWebSocketEvent(finalVerdict === 'PASS' ? 'job.completed' : 'job.partially_completed', { job_id: jobId }, { completionPercent, finalVerdict, report });
+        emitWebSocketEvent('job.execution_completed', { job_id: jobId }, { completionPercent, finalVerdict, report });
+
+        WorkflowService.startCompletionWorkflow({
+          jobId,
+          projectId: job.project_id,
+          prompt: job.prompt
+        }).catch(err => logger.error({ jobId, err: err.message }, 'Workflow execution error for job'));
+      } else {
+        const nextStatus = finalVerdict === 'PASS' ? 'completed' : 'partially_completed';
+        const workflowStatus = finalVerdict === 'PASS' ? 'completed' : 'failed';
+        dbRun(
+          `UPDATE jobs SET status = ?, execution_status = ?, workflow_status = ?, final_audit_verdict = ?, verified_requirements = ?, completion_percent = ?, report_json = ?, finished_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`,
+          [nextStatus, nextStatus, workflowStatus, finalVerdict, passedCount, completionPercent, reportJson, jobId]
+        );
+
+        emitWebSocketEvent(finalVerdict === 'PASS' ? 'job.completed' : 'job.partially_completed', { job_id: jobId }, { completionPercent, finalVerdict, report });
+      }
     });
   }
 }

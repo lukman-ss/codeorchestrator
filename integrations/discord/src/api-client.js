@@ -256,6 +256,38 @@ export class OrchestratorApiClient {
       body: {}
     });
   }
+
+  async listPendingApprovals(projectId = null) {
+    const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
+    return this.request(`/approvals/pending${qs}`);
+  }
+
+  async getApproval(approvalId) {
+    return this.request(`/approvals/${approvalId}`);
+  }
+
+  async decideApproval(approvalId, { decision, userId }) {
+    return this.request(`/approvals/${approvalId}/decide`, {
+      method: 'POST',
+      body: { decision, userId }
+    });
+  }
+
+  async getTaskReview(taskId) {
+    return this.request(`/tasks/${taskId}/review`);
+  }
+
+  async getJobReview(jobId) {
+    return this.request(`/jobs/${jobId}/review`);
+  }
+
+  async getTaskSecurityAudit(taskId) {
+    return this.request(`/tasks/${taskId}/security-audit`);
+  }
+
+  async getJobSecurityAudit(jobId) {
+    return this.request(`/jobs/${jobId}/security-audit`);
+  }
 }
 
 export default new OrchestratorApiClient();

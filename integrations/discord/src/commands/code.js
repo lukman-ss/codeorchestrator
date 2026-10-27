@@ -24,6 +24,8 @@ import {
   formatSpecificationCard,
   formatExecutionStartedCard,
   formatExecutionResultCard,
+  formatGitReviewCard,
+  formatGitDecisionResultCard,
   redactSensitive,
   safeMentions,
   safeEditReply,
@@ -359,6 +361,51 @@ export const data = new SlashCommandBuilder()
   )
   .addSubcommand(sub =>
     sub
+      .setName('approvals')
+      .setDescription('List pending Git approvals awaiting human decision')
+      .addStringOption(opt =>
+        opt
+          .setName('project')
+          .setDescription('Filter approvals by project')
+          .setRequired(false)
+          .setAutocomplete(true)
+      )
+  )
+  .addSubcommand(sub =>
+    sub
+      .setName('review')
+      .setDescription('Review 3-gate completion status and Git diff')
+      .addStringOption(opt =>
+        opt
+          .setName('id')
+          .setDescription('Approval ID, Task ID, or Job ID')
+          .setRequired(true)
+      )
+  )
+  .addSubcommand(sub =>
+    sub
+      .setName('approve')
+      .setDescription('Decide on a Git approval request (push or keep local)')
+      .addStringOption(opt =>
+        opt
+          .setName('id')
+          .setDescription('Approval ID')
+          .setRequired(true)
+      )
+      .addStringOption(opt =>
+        opt
+          .setName('decision')
+          .setDescription('Decision to apply')
+          .setRequired(true)
+          .addChoices(
+            { name: 'Push to GitHub', value: 'push' },
+            { name: 'Keep Local', value: 'keep_local' },
+            { name: 'Reject', value: 'reject' }
+          )
+      )
+  )
+  .addSubcommand(sub =>
+    sub
       .setName('help')
       .setDescription('Display available commands and domain architecture guide')
   );
@@ -481,7 +528,7 @@ export async function execute(interaction, eventListener = null) {
       .setCustomId('proj_branch')
       .setLabel('Git Branch')
       .setStyle(TextInputStyle.Short)
-      .setPlaceholder('main (leave empty for default)')
+      .setPlaceholder('Leave empty for default branch (e.g. main/master)')
       .setRequired(false)
       .setMaxLength(100);
 
@@ -552,6 +599,12 @@ export async function execute(interaction, eventListener = null) {
         return await handleAudit(interaction, userId, memberRoles);
       case 'report':
         return await handleReport(interaction, userId, memberRoles);
+      case 'approvals':
+        return await handleApprovals(interaction, userId, memberRoles);
+      case 'review':
+        return await handleReview(interaction, userId, memberRoles);
+      case 'approve':
+        return await handleApprove(interaction, userId, memberRoles);
       case 'cancel':
         return await handleCancel(interaction, userId, memberRoles);
       case 'help':
@@ -1160,9 +1213,9 @@ export async function handleButton(interaction) {
       const opRes = await apiClient.createProjectAsync({
         name: pending.name,
         slug: pending.slug,
-        description: pending.description,
-        repoUrl: pending.repoUrl,
-        branch: pending.branch,
+        description: pending.description || undefined,
+        repoUrl: pending.repoUrl || undefined,
+        branch: pending.branch || undefined,
         defaultModel: pending.defaultModel,
         userId
       });
@@ -1236,6 +1289,193 @@ export async function handleButton(interaction) {
         allowedMentions: safeMentions
       }, { type: 'project_error' });
     }
+  }
+
+  if (customId.startsWith('btn_git_push_') || customId.startsWith('btn_git_keeplocal_') || customId.startsWith('btn_git_reject_')) {
+    let decision = 'push';
+    let approvalId = '';
+    if (customId.startsWith('btn_git_push_')) {
+      decision = 'push';
+      approvalId = customId.replace('btn_git_push_', '');
+    } else if (customId.startsWith('btn_git_keeplocal_')) {
+      decision = 'keep_local';
+      approvalId = customId.replace('btn_git_keeplocal_', '');
+    } else {
+      decision = 'reject';
+      approvalId = customId.replace('btn_git_reject_', '');
+    }
+
+    try {
+      const approval = await apiClient.getApproval(approvalId);
+      if (!approval) {
+        return safeReply(interaction, { content: '❌ Approval request not found or expired.', ephemeral: true });
+      }
+
+      await interaction.update({
+        content: `⏳ Processing decision \`${decision}\` for approval \`${approvalId}\`...`,
+        components: []
+      });
+
+      const res = await apiClient.decideApproval(approvalId, { decision, userId });
+      const card = formatGitDecisionResultCard(approval, decision, {
+        commitSha: res.commitSha,
+        error: res.pushFailed ? res.reason : null
+      });
+
+      return safeEditReply(interaction, card);
+    } catch (err) {
+      return safeEditReply(interaction, {
+        content: redactSensitive(`❌ **Approval Decision Failed**: ${err.message}`),
+        components: []
+      });
+    }
+  }
+}
+
+async function handleApprovals(interaction, userId, memberRoles) {
+  const projectInput = interaction.options.getString('project');
+  let projectId = null;
+  if (projectInput) {
+    const proj = await apiClient.resolveProject(projectInput);
+    if (!proj) {
+      return safeEditReply(interaction, { content: `Project '${projectInput}' not found.` });
+    }
+    if (!auth.isProjectAllowedForUser(userId, memberRoles, proj)) {
+      return safeEditReply(interaction, { content: '❌ Access Denied: You do not have access to this project.' });
+    }
+    projectId = proj.id;
+  }
+
+  const items = await apiClient.listPendingApprovals(projectId);
+  if (!items || items.length === 0) {
+    return safeEditReply(interaction, {
+      content: '✅ No pending Git approvals awaiting decision.',
+      allowedMentions: safeMentions
+    });
+  }
+
+  const lines = [
+    `### 📋 Pending Git Approvals (${items.length})`,
+    ''
+  ];
+
+  for (const item of items) {
+    let diff = {};
+    try { diff = typeof item.diff_summary === 'object' ? item.diff_summary : JSON.parse(item.diff_summary_json || '{}'); } catch {}
+    let files = [];
+    try { files = Array.isArray(item.files_changed) ? item.files_changed : JSON.parse(item.files_changed_json || '[]'); } catch {}
+    const target = `${item.repository_identity} (${item.target_branch})`;
+    lines.push(`• **Approval**: \`${item.id}\``);
+    lines.push(`  - **Target**: \`${target}\``);
+    if (item.task_id) lines.push(`  - **Task**: \`${item.task_id}\``);
+    if (item.job_id) lines.push(`  - **Job**: \`${item.job_id}\``);
+    lines.push(`  - **Changes**: ${files.length} file(s) (+${diff.added || 0} ~${diff.modified || 0} -${diff.deleted || 0})`);
+    lines.push(`  - **Created**: <t:${Math.floor(new Date(item.created_at).getTime() / 1000)}:R>`);
+    lines.push('');
+  }
+
+  lines.push('Use `/code review <id>` to inspect details or `/code approve <id> <decision>` to decide.');
+
+  return safeEditReply(interaction, {
+    content: redactSensitive(lines.join('\n')),
+    allowedMentions: safeMentions
+  });
+}
+
+async function handleReview(interaction, userId, memberRoles) {
+  const id = interaction.options.getString('id', true).trim();
+
+  let approval = null;
+  let review = null;
+
+  try {
+    approval = await apiClient.getApproval(id);
+  } catch {}
+
+  if (!approval) {
+    try {
+      const taskReviewRes = await apiClient.getTaskReview(id);
+      approval = taskReviewRes.approval;
+      review = taskReviewRes.review;
+    } catch {}
+  }
+
+  if (!approval && !review) {
+    try {
+      const jobReviewRes = await apiClient.getJobReview(id);
+      approval = jobReviewRes.approval;
+      review = jobReviewRes.review;
+    } catch {}
+  }
+
+  if (!approval && !review) {
+    return safeEditReply(interaction, {
+      content: `❌ No completion gate review or approval found for \`${id}\`.`,
+      allowedMentions: safeMentions
+    });
+  }
+
+  if (approval) {
+    const card = formatGitReviewCard(approval, { review });
+    if (approval.status !== 'pending') {
+      card.components = [];
+      card.content += `\n\n*(Status: **${approval.status}**)*`;
+    }
+    return safeEditReply(interaction, card);
+  }
+
+  const rep = review.report || {};
+  const lines = [
+    '### 🛡️ CodeOrchestrator — Completion Gate Review',
+    `**Review ID**: \`${review.id}\``,
+    review.task_id ? `**Task ID**: \`${review.task_id}\`` : (review.job_id ? `**Job ID**: \`${review.job_id}\`` : ''),
+    `**Workflow Status**: \`${review.workflow_status}\``,
+    '',
+    `• Gate 1 (Verification): **${review.acceptance_status}**`,
+    `• Gate 2 (Security Audit): **${review.security_status}**`,
+    `• Gate 3 (Git Status): **${review.git_status}**`
+  ];
+  if (rep.gitError) lines.push(`\n**Git Error**: \`${rep.gitError}\``);
+  if (rep.verification?.evidenceSummary) lines.push(`\n**Verification**: ${rep.verification.evidenceSummary}`);
+
+  return safeEditReply(interaction, {
+    content: redactSensitive(lines.join('\n')),
+    allowedMentions: safeMentions
+  });
+}
+
+async function handleApprove(interaction, userId, memberRoles) {
+  const id = interaction.options.getString('id', true).trim();
+  const decision = interaction.options.getString('decision', true);
+
+  try {
+    const approval = await apiClient.getApproval(id);
+    if (!approval) {
+      return safeEditReply(interaction, {
+        content: `❌ Approval request \`${id}\` not found.`,
+        allowedMentions: safeMentions
+      });
+    }
+
+    if (approval.status !== 'pending') {
+      return safeEditReply(interaction, {
+        content: `⚠️ Approval request \`${id}\` is already in status '${approval.status}'.`,
+        allowedMentions: safeMentions
+      });
+    }
+
+    const res = await apiClient.decideApproval(id, { decision, userId });
+    const card = formatGitDecisionResultCard(approval, decision, {
+      commitSha: res.commitSha,
+      error: res.pushFailed ? res.reason : null
+    });
+
+    return safeEditReply(interaction, card);
+  } catch (err) {
+    return safeEditReply(interaction, {
+      content: redactSensitive(`❌ **Approval Decision Failed**: ${err.message}`),
+      allowedMentions: safeMentions
+    });
   }
 }
 

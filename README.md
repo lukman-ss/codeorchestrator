@@ -12,7 +12,10 @@ A lightweight, robust Node.js orchestration service providing REST and WebSocket
 - **SQLite Persistence**: Embedded ACID persistence with WAL mode, foreign keys, and strict relational `CHECK` constraints.
 - **Concurrency Queuing**: Configurable global and per-project task concurrency limits.
 - **Discord Bot Bridge**: Production bridge under `/code` featuring Hermes-like automatic channel discovery, originating-channel notification routing, and safe message chunking/redaction.
-- **Automated Security Gates**: Built-in secret scanning and release validation checks.
+- **Three Mandatory Completion Gates**: Full verification pipeline across tasks and multi-agent jobs before completion:
+  - **Gate 1 (Implementation Verification)**: Automated stack detection, syntax lint/checks, and test execution against acceptance criteria.
+  - **Gate 2 (Independent Security Audit)**: Deterministic secrets scanning, credential redaction, internal IP and home path leak checks, blocking CRITICAL/HIGH findings.
+  - **Gate 3 (Git Review & Human Approval)**: Task-owned file diff staging, repository identity guards (Ballo mismatch prevention), and interactive human decisions (`push` to remote or `keep_local` on disk). Standalone sessions without workspace file changes complete cleanly without manufacturing Git commits.
 
 ## Architecture
 
@@ -116,6 +119,14 @@ See [Configuration Guide](docs/configuration.md) for all options.
   - `POST /projects/:id/sessions`: Create session scoped to project workspace
   - `GET /projects/:id/sessions`: List sessions for project
 - **Tasks**: `POST /projects/:id/tasks`, `GET /tasks`, `GET /tasks/:id`, `POST /tasks/:id/cancel`
+- **Approvals & Completion Gates**:
+  - `GET /approvals/pending`: List pending Git approval requests
+  - `GET /approvals/:id`: Retrieve specific approval request
+  - `POST /approvals/:id/decide`: Submit decision (`push`, `keep_local`, or `reject`)
+  - `GET /tasks/:id/review`: Retrieve 3-gate workflow review and approval state for task
+  - `GET /jobs/:id/review`: Retrieve 3-gate workflow review and approval state for job
+  - `GET /tasks/:id/security-audit`: Retrieve security audit findings and limitations for task
+  - `GET /jobs/:id/security-audit`: Retrieve security audit findings and limitations for job
 - **WebSocket**: Connect to `ws://HOST:PORT/ws` and subscribe with `{ "type": "subscribe", "taskId": "<id>" }`
 
 ## Discord Bot Integration
@@ -149,6 +160,9 @@ CodeOrchestrator includes an isolated Discord Bridge (`integrations/discord/`) i
   - `/code status`: Real-time task, job, or session status inspection
   - `/code audit`: Independent auditor findings and verification evidence
   - `/code report`: Final execution summaries
+  - `/code approvals [project:<name>]`: List pending Git review requests awaiting human decision
+  - `/code review id:<id>`: View 3-gate review card with interactive `[Push to GitHub]`, `[Keep Local]`, and `[Reject]` buttons
+  - `/code approve id:<id> decision:<push|keep_local|reject>`: Submit human approval decision directly
   - `/code cancel`: Idempotent task/job cancellation with explicit confirmation
   - `/code help`: Command usage summary
 

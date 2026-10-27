@@ -338,6 +338,120 @@ export const formatExecutionResultCard = (submission, result, { projectSlug = ''
   };
 };
 
+export const formatGitReviewCard = (approval, { review = null, projectSlug = '' } = {}) => {
+  const approvalId = approval.id;
+  const repo = approval.repository_identity || approval.repository || 'unknown';
+  const branch = approval.target_branch || 'main';
+  let files = [];
+  try {
+    files = Array.isArray(approval.files_changed)
+      ? approval.files_changed
+      : JSON.parse(approval.files_changed || '[]');
+  } catch { files = []; }
+
+  let diff = {};
+  try {
+    diff = typeof approval.diff_summary === 'object' && approval.diff_summary !== null
+      ? approval.diff_summary
+      : JSON.parse(approval.diff_summary || '{}');
+  } catch { diff = {}; }
+
+  const commitMsg = approval.proposed_commit_message || 'Task implementation completed';
+
+  const lines = [
+    '### 🛡️ Completion Gates Review & Approval',
+    `**Repository**: \`${repo}\``,
+    `**Target Branch**: \`${branch}\``,
+    `**Approval ID**: \`${approvalId}\``,
+    approval.task_id ? `**Task ID**: \`${approval.task_id}\`` : (approval.job_id ? `**Job ID**: \`${approval.job_id}\`` : ''),
+    '',
+    '**Gate Checks**:',
+    '• Gate 1 (Verification): ✅ **PASS**',
+    '• Gate 2 (Security Audit): ✅ **PASS** (0 secrets / confidential leaks)',
+    '• Gate 3 (Git Review): ⏳ **AWAITING DECISION**',
+    '',
+    `**Diff**: ${files.length} changed file(s) (+${diff.added || 0} ~${diff.modified || 0} -${diff.deleted || 0})`,
+    files.length > 0 ? `\`${files.slice(0, 5).join(', ')}${files.length > 5 ? ` (+${files.length - 5} more)` : ''}\`` : '*(no changes)*',
+    '',
+    `**Proposed Commit**: \`${commitMsg.slice(0, 100)}\``,
+    '',
+    'Click **Push to GitHub** to push your commit, or **Keep Local** to preserve files without pushing.'
+  ].filter(Boolean);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`btn_git_push_${approvalId}`)
+      .setLabel('Push to GitHub')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`btn_git_keeplocal_${approvalId}`)
+      .setLabel('Keep Local')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`btn_git_reject_${approvalId}`)
+      .setLabel('Reject')
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  return {
+    content: redactSensitive(lines.join('\n')),
+    components: [row]
+  };
+};
+
+export const formatGitDecisionResultCard = (approval, decision, { commitSha = null, error = null } = {}) => {
+  const repo = approval?.repository_identity || 'unknown';
+  const branch = approval?.target_branch || 'main';
+  const approvalId = approval?.id || 'N/A';
+
+  if (error) {
+    return {
+      content: redactSensitive([
+        '### ❌ Git Operation Blocked / Failed',
+        `**Approval ID**: \`${approvalId}\``,
+        `**Decision**: \`${decision}\``,
+        `**Error**: ${error}`
+      ].join('\n')),
+      components: []
+    };
+  }
+
+  if (decision === 'push') {
+    return {
+      content: redactSensitive([
+        '### 🚀 Pushed to GitHub Successfully',
+        `**Approval ID**: \`${approvalId}\``,
+        `**Repository**: \`${repo}\``,
+        `**Branch**: \`${branch}\``,
+        commitSha ? `**Commit SHA**: \`${commitSha}\`` : '',
+        'Gate 3 complete. Workflow completed.'
+      ].filter(Boolean).join('\n')),
+      components: []
+    };
+  }
+
+  if (decision === 'keep_local') {
+    return {
+      content: redactSensitive([
+        '### 📁 Local Changes Preserved',
+        `**Approval ID**: \`${approvalId}\``,
+        'Workspace modifications preserved locally. Git push bypassed.',
+        'Gate 3 complete. Workflow completed.'
+      ].join('\n')),
+      components: []
+    };
+  }
+
+  return {
+    content: redactSensitive([
+      '### 🛑 Approval Rejected',
+      `**Approval ID**: \`${approvalId}\``,
+      'Changes were rejected and have not been pushed.'
+    ].join('\n')),
+    components: []
+  };
+};
+
 export default {
   DISCORD_LIMITS,
   redactSensitive,
@@ -349,6 +463,8 @@ export default {
   formatSpecificationCard,
   formatExecutionStartedCard,
   formatExecutionResultCard,
+  formatGitReviewCard,
+  formatGitDecisionResultCard,
   splitTextIntoChunks,
   validateEmbed,
   validateEmbeds,

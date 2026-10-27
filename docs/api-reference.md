@@ -265,3 +265,78 @@ Cancels an active or queued task.
 ```bash
 curl -X POST http://127.0.0.1:4000/tasks/<TASK_ID>/cancel -H "Authorization: Bearer <TOKEN>"
 ```
+
+---
+
+## Approvals & Completion Gates API (`/approvals`)
+
+The orchestrator enforces three completion gates before marking tasks or multi-agent jobs completed:
+1. **Gate 1**: Implementation Verification (syntax checks, criteria tests)
+2. **Gate 2**: Independent Security Audit (secret scanning, path/IP leak checks)
+3. **Gate 3**: Git Review & Human Approval (diff inspection, repository identity check, `push` vs `keep_local`)
+
+### `GET /approvals/pending`
+Lists all approval requests currently awaiting human decision (`awaiting_approval`).
+
+| Query Param | Type | Description |
+|---|---|---|
+| `projectId` | string | Filter pending approvals by project UUID (optional). |
+
+```bash
+curl http://127.0.0.1:4000/approvals/pending -H "Authorization: Bearer <TOKEN>"
+```
+
+### `GET /approvals/:id`
+Retrieves approval request details including target project, branch, commit message, files changed, and gate verification summary.
+
+```bash
+curl http://127.0.0.1:4000/approvals/<APPROVAL_REQUEST_ID> -H "Authorization: Bearer <TOKEN>"
+```
+
+### `POST /approvals/:id/decide`
+Submits a human decision on a pending approval request.
+
+Parameters:
+- `decision` (string, required): One of `'push'`, `'keep_local'`, or `'reject'`.
+  - `'push'`: Commits task-owned files and pushes to remote Git repository.
+  - `'keep_local'`: Preserves generated workspace changes on disk and completes workflow without pushing.
+  - `'reject'`: Rejects changes and marks workflow failed.
+- `userId` (string, required): Identifier of the approving user.
+
+```bash
+curl -X POST http://127.0.0.1:4000/approvals/<APPROVAL_REQUEST_ID>/decide \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "decision": "push",
+    "userId": "1558030770159882250"
+  }'
+```
+
+### `GET /tasks/:id/review`
+Retrieves 3-gate workflow review status and Git approval details for a task.
+
+```bash
+curl http://127.0.0.1:4000/tasks/<TASK_ID>/review -H "Authorization: Bearer <TOKEN>"
+```
+
+### `GET /jobs/:id/review`
+Retrieves 3-gate workflow review status and Git approval details for a multi-agent job.
+
+```bash
+curl http://127.0.0.1:4000/jobs/<JOB_ID>/review -H "Authorization: Bearer <TOKEN>"
+```
+
+### `GET /tasks/:id/security-audit`
+Retrieves Gate 2 independent security audit results, findings, and toolchain limitations for a task.
+
+```bash
+curl http://127.0.0.1:4000/tasks/<TASK_ID>/security-audit -H "Authorization: Bearer <TOKEN>"
+```
+
+### `GET /jobs/:id/security-audit`
+Retrieves Gate 2 independent security audit results, findings, and toolchain limitations for a multi-agent job.
+
+```bash
+curl http://127.0.0.1:4000/jobs/<JOB_ID>/security-audit -H "Authorization: Bearer <TOKEN>"
+```
