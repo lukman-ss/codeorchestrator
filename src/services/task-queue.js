@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { OPENCODE_BIN, NINEROUTER_API_KEY as API_KEY, WORKSPACE_ROOT, CANCEL_TIMEOUT_MS, MIN_FREE_DISK_MB, MAX_DISK_USAGE_PERCENT } from '../config.js';
+import { OPENCODE_BIN, NINEROUTER_API_KEY as API_KEY, WORKSPACE_ROOT, CANCEL_TIMEOUT_MS, MIN_FREE_DISK_MB, MAX_DISK_USAGE_PERCENT, DEFAULT_MODEL } from '../config.js';
 import { dbGetOne, dbRun, dbGet } from '../database/db.js';
 import { MAX_CONCURRENT_TASKS_PER_PROJECT as MAX_PROJECT_TASKS, MAX_CONCURRENT_TASKS as MAX_GLOBAL_TASKS } from '../config.js';
 import { TaskLogger, cleanupTaskLogs } from './task-logger.js';
@@ -83,7 +83,8 @@ const schedule = () => {
 
 const runTask = (task) => {
   const env = { ...process.env, NINEROUTER_API_KEY: API_KEY };
-  const args = ['-m', task.model, '--auto', '--pure', 'run', '--format', 'json'];
+  const targetModel = task.model || DEFAULT_MODEL;
+  const args = ['run', '-m', targetModel, '--auto', '--format', 'json'];
   
   // If task has an associated session that has an opencode_session_id, pass -s
   if (task.session_id) {
@@ -93,7 +94,10 @@ const runTask = (task) => {
     }
   }
   
-  args.push(task.prompt);
+  const useStdin = Buffer.byteLength(task.prompt || '', 'utf8') > 32768;
+  if (!useStdin && task.prompt) {
+    args.push(task.prompt);
+  }
   logger.info({ taskId: task.id, hasKey: !!API_KEY, args }, 'Spawning OpenCode task');
   
   const workspace = join(WORKSPACE_ROOT, dbGetOne('SELECT slug FROM projects WHERE id=?', [task.project_id]).slug);
@@ -102,8 +106,13 @@ const runTask = (task) => {
     cwd: workspace,
     env,
     shell: false,
-    stdio: ['ignore', 'pipe', 'pipe']
+    stdio: ['pipe', 'pipe', 'pipe']
   });
+  if (useStdin && task.prompt) {
+    child.stdin.end(task.prompt, 'utf8');
+  } else {
+    child.stdin.end();
+  }
   processes.set(task.id, child);
   globalRunning++;
   const taskLogger = new TaskLogger(task.id);

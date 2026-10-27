@@ -61,10 +61,20 @@ Use OpenCode JSON format output.`;
 
     emitWebSocketEvent('repair.started', subtask, { executionId, role: 'repair' });
 
-    const args = ['-m', model, '--auto', '--pure', 'run', '--format', 'json', repairPrompt];
+    const targetModel = model || DEFAULT_MODEL;
+    const args = ['run', '-m', targetModel, '--auto', '--format', 'json'];
+    const useStdin = Buffer.byteLength(repairPrompt || '', 'utf8') > 32768;
+    if (!useStdin && repairPrompt) {
+      args.push(repairPrompt);
+    }
     const env = { ...process.env, NINEROUTER_API_KEY };
 
     const child = spawn(OPENCODE_BIN, args, { cwd: workspacePath, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    if (useStdin && repairPrompt) {
+      child.stdin.end(repairPrompt, 'utf8');
+    } else {
+      child.stdin.end();
+    }
     const currentRepairExec = activeExecutions.get(executionId);
     if (currentRepairExec) currentRepairExec.process = child;
 
@@ -164,9 +174,19 @@ export class IntegrationAgent {
 
     const integrationPrompt = `Integrate the verified implementation from ${subtask.worktree_path || project.workspace_path} into the canonical project. Check for conflicts and run project-level verification.`;
 
-    const args = ['-m', integrationModel, '--auto', '--pure', 'run', '--format', 'json', integrationPrompt];
+    const targetIntegrationModel = integrationModel || DEFAULT_MODEL;
+    const args = ['run', '-m', targetIntegrationModel, '--auto', '--format', 'json'];
+    const useStdin = Buffer.byteLength(integrationPrompt || '', 'utf8') > 32768;
+    if (!useStdin && integrationPrompt) {
+      args.push(integrationPrompt);
+    }
     const env = { ...process.env, NINEROUTER_API_KEY };
     const child = spawn(OPENCODE_BIN, args, { cwd: project.workspace_path, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    if (useStdin && integrationPrompt) {
+      child.stdin.end(integrationPrompt, 'utf8');
+    } else {
+      child.stdin.end();
+    }
     const currentIntegrationExec = activeExecutions.get(executionId);
     if (currentIntegrationExec) currentIntegrationExec.process = child;
 
@@ -259,9 +279,18 @@ Failed audits: ${allAudits.length}
 
 Determine if the job should be marked COMPLETE or PARTIALLY_COMPLETED.`;
 
-    const args = ['-m', DEFAULT_MODEL, '--auto', '--pure', 'run', '--format', 'json', prompt];
+    const args = ['run', '-m', DEFAULT_MODEL, '--auto', '--format', 'json'];
+    const useStdin = Buffer.byteLength(prompt || '', 'utf8') > 32768;
+    if (!useStdin && prompt) {
+      args.push(prompt);
+    }
     const env = { ...process.env, NINEROUTER_API_KEY };
     const child = spawn(OPENCODE_BIN, args, { cwd: job.project_id ? '' : process.cwd(), env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    if (useStdin && prompt) {
+      child.stdin.end(prompt, 'utf8');
+    } else {
+      child.stdin.end();
+    }
 
     const outputChunks = [];
     child.stdout.on('data', (chunk) => outputChunks.push(chunk.toString()));

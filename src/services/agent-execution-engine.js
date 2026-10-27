@@ -67,10 +67,20 @@ export class AgentExecutionEngine {
 
     emitWebSocketEvent('agent.started', subtask, { executionId, role: 'worker' });
 
-    const args = ['-m', model, '--auto', '--pure', 'run', '--format', 'json', subtask.prompt];
+    const targetModel = model || DEFAULT_MODEL;
+    const args = ['run', '-m', targetModel, '--auto', '--format', 'json'];
+    const useStdin = Buffer.byteLength(subtask.prompt || '', 'utf8') > 32768;
+    if (!useStdin && subtask.prompt) {
+      args.push(subtask.prompt);
+    }
     const env = { ...process.env, NINEROUTER_API_KEY };
 
     const child = spawn(OPENCODE_BIN, args, { cwd: workspacePath, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    if (useStdin && subtask.prompt) {
+      child.stdin.end(subtask.prompt, 'utf8');
+    } else {
+      child.stdin.end();
+    }
     const currentExec = activeExecutions.get(executionId);
     if (currentExec) currentExec.process = child;
 
@@ -185,9 +195,19 @@ Do NOT fabricate evidence. Execute relevant verification commands.` +
 
     emitWebSocketEvent('audit.started', subtask, { executionId, role: isRepair ? 'repair' : 'auditor' });
 
-    const args = ['-m', auditModel, '--auto', '--pure', 'run', '--format', 'json', auditPrompt];
+    const targetAuditModel = auditModel || DEFAULT_MODEL;
+    const args = ['run', '-m', targetAuditModel, '--auto', '--format', 'json'];
+    const useStdin = Buffer.byteLength(auditPrompt || '', 'utf8') > 32768;
+    if (!useStdin && auditPrompt) {
+      args.push(auditPrompt);
+    }
     const env = { ...process.env, NINEROUTER_API_KEY };
     const child = spawn(OPENCODE_BIN, args, { cwd: subtask.worktree_path || project.workspace_path, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    if (useStdin && auditPrompt) {
+      child.stdin.end(auditPrompt, 'utf8');
+    } else {
+      child.stdin.end();
+    }
     const currentAuditExec = activeExecutions.get(executionId);
     if (currentAuditExec) currentAuditExec.process = child;
 
