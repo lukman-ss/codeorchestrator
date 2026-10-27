@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
+import codeCommand, {
   data as codeCommandData,
   execute,
   handleAutocomplete,
@@ -151,6 +151,14 @@ function createMockButtonInteraction({
     getUpdated: () => updated
   };
 }
+
+// 0. Default export contains all required interaction handlers
+test('0. codeCommand default export contains execute, handleAutocomplete, handleModalSubmit, handleButton', () => {
+  assert.equal(typeof codeCommand.execute, 'function');
+  assert.equal(typeof codeCommand.handleAutocomplete, 'function');
+  assert.equal(typeof codeCommand.handleModalSubmit, 'function');
+  assert.equal(typeof codeCommand.handleButton, 'function');
+});
 
 // 1. Slash command registration
 test('1. Slash command registration schema has group /code and all 8 subcommands', () => {

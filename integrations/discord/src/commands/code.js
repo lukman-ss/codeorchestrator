@@ -1739,5 +1739,7 @@ async function handleHelp(interaction) {
 export default {
   data,
   execute,
-  handleAutocomplete
+  handleAutocomplete,
+  handleModalSubmit,
+  handleButton
 };
