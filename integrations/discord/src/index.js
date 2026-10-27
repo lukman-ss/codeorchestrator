@@ -129,7 +129,7 @@ export class DiscordBridgeApp {
             await codeCommand.handleModalSubmit(interaction);
           }
         } else if (interaction.isButton()) {
-          if (interaction.customId.startsWith('btn_proj_')) {
+          if (interaction.customId.startsWith('btn_proj_') || interaction.customId.startsWith('btn_sub_')) {
             await codeCommand.handleButton(interaction);
           } else {
             await this.handleButtonInteraction(interaction);

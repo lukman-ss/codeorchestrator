@@ -105,6 +105,18 @@ export class OrchestratorApiClient {
     return this.request(`/projects/${projectId}/tasks`);
   }
 
+  async repairProject(projectId, { repoUrl, defaultBranch, confirm = true } = {}) {
+    return this.request(`/projects/${projectId}/repair`, {
+      method: 'POST',
+      body: { repoUrl, defaultBranch, confirm }
+    });
+  }
+
+  async validateProject(projectId, params = {}) {
+    const qs = new URLSearchParams(params).toString();
+    return this.request(`/projects/${projectId}/validate${qs ? `?${qs}` : ''}`);
+  }
+
   async resolveProject(idOrSlug) {
     if (!idOrSlug) return null;
     const projects = await this.fetchProjects();

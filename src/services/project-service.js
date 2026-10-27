@@ -443,3 +443,109 @@ export const importProject = (slugOrDir, { name, isTest = 0, userId } = {}) => {
 
   return getProject(id);
 };
+
+// ponytail: basic git config and ballo identity checks, upgrade path: deep multi-remote and signed commit verification
+export const validateProjectWorkspace = (project, options = {}) => {
+  if (!project) {
+    return { valid: false, error: 'Project is required' };
+  }
+
+  const workspacePath = project.workspace_path;
+  if (!workspacePath || !existsSync(workspacePath)) {
+    return {
+      valid: false,
+      error: `Workspace directory does not exist: ${workspacePath}`
+    };
+  }
+
+  let actualRemote = null;
+  const gitDir = join(workspacePath, '.git');
+  if (existsSync(gitDir)) {
+    try {
+      actualRemote = runGit(['-C', workspacePath, 'config', '--get', 'remote.origin.url']) || null;
+    } catch {}
+  }
+
+  const projectName = (project.name || '').toLowerCase();
+  const projectSlug = (project.slug || '').toLowerCase();
+  const detectedStack = detectTechnologyStack(workspacePath);
+
+  // Critical Ballo repository identity check
+  if (projectName === 'ballo' || projectSlug === 'ballo') {
+    const intendedRepo = 'https://github.com/lukman-ss/ballo';
+    const isCodeOrchestrator = actualRemote && (actualRemote.includes('codeorchestrator') || actualRemote.includes('coding-orchestrator'));
+    const isNotBallo = !actualRemote || !actualRemote.includes('/ballo');
+    if (isCodeOrchestrator || isNotBallo) {
+      return {
+        valid: false,
+        mismatch: true,
+        error: `Repository mismatch detected: Project 'ballo' workspace remote is '${actualRemote}' (${detectedStack}) but intended repository is '${intendedRepo}' (Go). Execution blocked to protect workspace integrity. Explicit authorized correction required.`,
+        actualRemote,
+        expectedRemote: intendedRepo,
+        detectedStack,
+        expectedStack: 'Go'
+      };
+    }
+  }
+
+  // Explicit expected target repository check
+  const expectedRepo = options.expectedRepoUrl || project.metadata?.expectedRepoUrl;
+  if (expectedRepo && actualRemote) {
+    const normActual = actualRemote.trim().toLowerCase().replace(/\.git$/, '').replace(/\/+$/, '');
+    const normExpected = expectedRepo.trim().toLowerCase().replace(/\.git$/, '').replace(/\/+$/, '');
+    if (normActual !== normExpected) {
+      return {
+        valid: false,
+        mismatch: true,
+        error: `Repository mismatch detected: Workspace remote '${actualRemote}' does not match expected repository '${expectedRepo}'.`,
+        actualRemote,
+        expectedRemote: expectedRepo
+      };
+    }
+  }
+
+  return {
+    valid: true,
+    actualRemote,
+    stack: detectedStack
+  };
+};
+
+// ponytail: metadata-only repair without filesystem mutation, upgrade path: interactive worktree migration
+export const repairProject = (id, { repoUrl, defaultBranch, confirm = false, userId = null } = {}) => {
+  if (!confirm) {
+    throw new Error('Explicit confirmation is required to repair project configuration');
+  }
+  const project = getProject(id);
+  const metadata = { ...(project.metadata || {}) };
+
+  if (repoUrl) {
+    const urlCheck = validateGitHubUrl(repoUrl, { allowLocal: Boolean(project.is_test) || process.env.NODE_ENV === 'test' });
+    if (!urlCheck.valid) {
+      throw new Error(`Invalid repository URL: ${urlCheck.error}`);
+    }
+    metadata.expectedRepoUrl = repoUrl;
+  }
+  metadata.repairedAt = new Date().toISOString();
+  metadata.repairedByUserId = userId;
+
+  const set = ['metadata_json = ?'];
+  const vals = [JSON.stringify(metadata)];
+
+  if (repoUrl) {
+    set.push('repo_url = ?', 'repository_url = ?');
+    vals.push(repoUrl, repoUrl);
+  }
+  if (defaultBranch) {
+    const branchCheck = validateGitBranch(defaultBranch);
+    if (!branchCheck.valid) {
+      throw new Error(`Invalid branch: ${branchCheck.error}`);
+    }
+    set.push('default_branch = ?');
+    vals.push(defaultBranch);
+  }
+
+  vals.push(project.id);
+  dbRun(`UPDATE projects SET ${set.join(', ')}, updated_at = datetime('now') WHERE id = ?`, vals);
+  return getProject(project.id);
+};

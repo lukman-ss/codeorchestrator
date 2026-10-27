@@ -3,7 +3,7 @@ import { mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { dbGetOne, dbRun, dbGet } from '../database/db.js';
-import { getProject } from './project-service.js';
+import { getProject, validateProjectWorkspace } from './project-service.js';
 import {
   OPENCODE_BIN,
   NINEROUTER_API_KEY,
@@ -66,7 +66,11 @@ export const createSession = (arg1, arg2 = {}) => {
 
   if (projectId || type === 'project') {
     if (!projectId) throw new Error('Project ID is required for project sessions');
-    getProject(projectId); // Validates project existence
+    const project = getProject(projectId); // Validates project existence
+    const wsCheck = validateProjectWorkspace(project);
+    if (!wsCheck.valid) {
+      throw new Error(wsCheck.error);
+    }
     type = 'project';
   } else {
     type = 'standalone';
@@ -231,6 +235,10 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
       mkdirSync(workingDir, { recursive: true });
     } else {
       const project = getProject(session.project_id);
+      const wsCheck = validateProjectWorkspace(project);
+      if (!wsCheck.valid) {
+        throw new Error(wsCheck.error);
+      }
       workingDir = project.workspace_path;
       if (!existsSync(workingDir)) mkdirSync(workingDir, { recursive: true });
     }
@@ -253,7 +261,12 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
     if (session.opencode_session_id) {
       args.push('-s', session.opencode_session_id);
     }
-    args.push(prompt);
+
+    // Pass via stdin when prompt length exceeds CLI argument threshold to prevent E2BIG
+    const useStdin = Buffer.byteLength(prompt, 'utf8') > 32768;
+    if (!useStdin) {
+      args.push(prompt);
+    }
 
     logger.info({ sessionId: session.id, model: targetModel, workingDir, hasSessionId: !!session.opencode_session_id }, 'Spawning OpenCode session message execution');
 
@@ -269,8 +282,13 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
           cwd: workingDir,
           env,
           shell: false,
-          stdio: ['ignore', 'pipe', 'pipe']
+          stdio: ['pipe', 'pipe', 'pipe']
         });
+        if (useStdin) {
+          child.stdin.end(prompt, 'utf8');
+        } else {
+          child.stdin.end();
+        }
       } catch (err) {
         dbRun("UPDATE sessions SET status = 'interrupted', updated_at = datetime('now') WHERE id = ?", [session.id]);
         return reject(err);

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { dbGetOne, dbRun, dbGet } from '../database/db.js';
-import { getProject } from './project-service.js';
+import { getProject, validateProjectWorkspace } from './project-service.js';
 import { getSession } from './session-service.js';
 
 export const listTasks = (projectId) => {
@@ -46,6 +46,10 @@ export const linkOpenCodeSession = (sessionId, opencodeSessionId) => {
 
 export const createTask = (projectId, { prompt, model, sessionId }) => {
   const project = getProject(projectId);
+  const wsCheck = validateProjectWorkspace(project);
+  if (!wsCheck.valid) {
+    throw new Error(wsCheck.error);
+  }
   const session = createSession(projectId, { sessionId, model });
   const id = randomUUID();
   dbRun(

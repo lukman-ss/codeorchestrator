@@ -4,9 +4,10 @@ A lightweight, robust Node.js orchestration service providing REST and WebSocket
 
 ## Features
 
-- **Fastify REST API**: Comprehensive endpoints for workspaces, standalone sessions, project-linked sessions, interactive message continuation, task queues, and event streams.
+- **Fastify REST API**: Comprehensive endpoints for workspaces, standalone sessions, project-linked sessions, interactive message continuation, task queues, project validation/repair, and event streams.
 - **Architectural Separation**: Clean separation between **Projects** (persistent git workspaces in `WORKSPACE_ROOT`) and **Standalone Sessions** (independent OpenCode conversational sessions in `data/session-runtime/<sessionId>` with `project_id = NULL`).
-- **Real OpenCode Continuation**: Full multi-turn context persistence leveraging upstream OpenCode CLI session flags (`-s <sessionID>`) with per-session concurrency mutex locks.
+- **Real OpenCode Continuation**: Full multi-turn context persistence leveraging upstream OpenCode CLI session flags (`-s <sessionID>`) with per-session concurrency mutex locks. Automatic stdin streaming for prompts > 32KB avoids Linux `MAX_ARG_STRLEN` (128KB) limits.
+- **Workspace Protection & Repair**: Automated git remote mismatch detection blocks executions when project workspaces point to unexpected repositories (including critical `ballo` workspace guards), paired with safe metadata repair APIs.
 - **WebSocket Streaming**: Real-time event streaming (`/ws`) with sequence-based buffer replay.
 - **SQLite Persistence**: Embedded ACID persistence with WAL mode, foreign keys, and strict relational `CHECK` constraints.
 - **Concurrency Queuing**: Configurable global and per-project task concurrency limits.
@@ -124,6 +125,9 @@ CodeOrchestrator includes an isolated Discord Bridge (`integrations/discord/`) i
 - **Natural Chat Interaction**:
   - Mention `@Agent Coding <prompt>` in any authorized channel to start or continue an active standalone session.
   - Reply directly to any bot message to continue that specific conversation branch (routes back to the exact historical OpenCode session).
+  - Support for long specifications via `.txt` and `.md` file attachments (up to 256KB) with SHA-256 integrity digests and restrictive `0600` artifact storage.
+  - Multipart prompt collection (`/code prompt start`, `/code prompt submit`, `/code prompt cancel`) assembled across message chunks and persisted across bot restarts.
+  - Interactive specification acknowledgment card with `[Execute]` and `[Cancel]` buttons guarded by cross-user authorization.
   - One active standalone session per user per channel/thread; cross-user isolation prevents hijacking.
   - Automatic multi-chunk handling: splits messages <= 1,900 chars; attaches sanitized `.txt` file when response exceeds 3 chunks.
   - Graceful fallback on `GatewayIntentBits.MessageContent` if privileged intent is pending in Discord Developer Portal.
@@ -137,6 +141,8 @@ CodeOrchestrator includes an isolated Discord Bridge (`integrations/discord/`) i
   - `/code project create`: Create a persistent project workspace via an interactive modal form and confirmation card
   - `/code project import`: Register an unmanaged directory under workspace root with stack detection
   - `/code project info`: Inspect project details, git remote, default branch, model, and active sessions
+  - `/code project repair`: Safely repair repository remote metadata without mutating or deleting existing checkouts
+  - `/code prompt start|submit|cancel`: Collect, assemble, or abort multipart specifications across Discord messages
   - `/code projects`: View accessible persistent coding workspaces with relative slugs and Git status
   - `/code run`: Submit single coding tasks to a project workspace
   - `/code job`: Submit multi-agent workflows with automated worker, auditor, and integration roles

@@ -6,9 +6,15 @@ import { ParallelScheduler } from './parallel-scheduler.js';
 import logger from '../logger.js';
 import { emitWebSocketEvent } from '../realtime/event-bus.js';
 import { AgentExecutionEngine } from './agent-execution-engine.js';
+import { getProject, validateProjectWorkspace } from './project-service.js';
 
 export class Supervisor {
   static async createJob(projectId, prompt) {
+    const project = getProject(projectId);
+    const wsCheck = validateProjectWorkspace(project);
+    if (!wsCheck.valid) {
+      throw new Error(wsCheck.error);
+    }
     const jobId = randomUUID();
     const promptHash = createHash('sha256').update(prompt).digest('hex');
     const requirements = RequirementExtractor.extract(prompt);

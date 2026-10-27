@@ -126,13 +126,18 @@ export class AuthorizationService {
     return this.config.allowedProjects.includes(projectId) || this.config.allowedProjects.includes(projectSlug);
   }
 
+  isAdmin(userId, memberRoles = []) {
+    return Boolean(
+      (this.config.adminUserIds && this.config.adminUserIds.includes(userId)) ||
+      (this.config.adminRoleIds && memberRoles.some(r => this.config.adminRoleIds.includes(r)))
+    );
+  }
+
   isSessionAllowedForUser(userId, memberRoles = [], session) {
     if (!session) return false;
     if (!this.isUserAllowed(userId, memberRoles)) return false;
 
-    const isAdmin =
-      (this.config.adminUserIds && this.config.adminUserIds.includes(userId)) ||
-      (this.config.adminRoleIds && memberRoles.some(r => this.config.adminRoleIds.includes(r)));
+    const isAdmin = this.isAdmin(userId, memberRoles);
 
     if (session.session_type === 'standalone') {
       if (!session.user_id) return true;

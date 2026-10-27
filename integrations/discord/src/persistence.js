@@ -67,6 +67,56 @@ export class PersistenceStore {
       CREATE INDEX IF NOT EXISTS idx_discord_msg_conv ON discord_session_messages(conversation_id);
       CREATE INDEX IF NOT EXISTS idx_discord_msg_session ON discord_session_messages(session_id);
       CREATE INDEX IF NOT EXISTS idx_discord_msg_status ON discord_session_messages(status);
+
+      CREATE TABLE IF NOT EXISTS discord_submissions (
+        id TEXT PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        message_id TEXT,
+        submission_type TEXT NOT NULL,
+        input_method TEXT NOT NULL,
+        project_id TEXT,
+        session_id TEXT,
+        execution_id TEXT,
+        prompt_hash TEXT NOT NULL,
+        prompt_length INTEGER NOT NULL,
+        artifact_path TEXT,
+        status TEXT NOT NULL DEFAULT 'received' CHECK(status IN ('received', 'confirmed', 'executing', 'completed', 'failed', 'cancelled')),
+        metadata_json TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_discord_sub_user ON discord_submissions(user_id);
+      CREATE INDEX IF NOT EXISTS idx_discord_sub_status ON discord_submissions(status);
+      CREATE INDEX IF NOT EXISTS idx_discord_sub_msg ON discord_submissions(message_id);
+
+      CREATE TABLE IF NOT EXISTS discord_multipart_prompts (
+        id TEXT PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        project_id TEXT,
+        status TEXT NOT NULL DEFAULT 'collecting' CHECK(status IN ('collecting', 'submitted', 'cancelled')),
+        total_chunks INTEGER DEFAULT 0,
+        total_bytes INTEGER DEFAULT 0,
+        artifact_path TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_discord_mp_user_scope ON discord_multipart_prompts(guild_id, channel_id, user_id, status);
+
+      CREATE TABLE IF NOT EXISTS discord_multipart_chunks (
+        id TEXT PRIMARY KEY,
+        multipart_prompt_id TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        discord_message_id TEXT,
+        content TEXT NOT NULL,
+        byte_length INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(multipart_prompt_id, chunk_index)
+      );
+      CREATE INDEX IF NOT EXISTS idx_discord_mp_chunk_prompt ON discord_multipart_chunks(multipart_prompt_id);
     `);
   }
 
@@ -272,9 +322,158 @@ export class PersistenceStore {
   }
 
   reconcileRunningMessages() {
-    return this.db.prepare(
+    this.db.prepare(
       "UPDATE discord_session_messages SET status = 'failed', error = 'Bridge restart during execution' WHERE status IN ('received', 'queued', 'running')"
     ).run();
+    this.db.prepare(
+      "UPDATE discord_submissions SET status = 'failed' WHERE status = 'executing'"
+    ).run();
+  }
+
+  // Submission persistence methods
+  saveSubmission(item) {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO discord_submissions
+      (id, guild_id, channel_id, user_id, message_id, submission_type, input_method, project_id, session_id, execution_id, prompt_hash, prompt_length, artifact_path, status, metadata_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    `);
+    stmt.run(
+      item.id,
+      item.guildId,
+      item.channelId,
+      item.userId,
+      item.messageId || null,
+      item.submissionType || 'attachment',
+      item.inputMethod || 'normal_mention',
+      item.projectId || null,
+      item.sessionId || null,
+      item.executionId || null,
+      item.promptHash,
+      item.promptLength || 0,
+      item.artifactPath || null,
+      item.status || 'received',
+      item.metadataJson || (item.metadata ? JSON.stringify(item.metadata) : null)
+    );
+    return this.getSubmission(item.id);
+  }
+
+  getSubmission(id) {
+    const row = this.db.prepare('SELECT * FROM discord_submissions WHERE id = ?').get(id);
+    if (!row) return null;
+    let metadata = {};
+    try { metadata = row.metadata_json ? JSON.parse(row.metadata_json) : {}; } catch {}
+    return { ...row, metadata };
+  }
+
+  getSubmissionByMessageId(messageId) {
+    const row = this.db.prepare('SELECT * FROM discord_submissions WHERE message_id = ?').get(messageId);
+    if (!row) return null;
+    let metadata = {};
+    try { metadata = row.metadata_json ? JSON.parse(row.metadata_json) : {}; } catch {}
+    return { ...row, metadata };
+  }
+
+  updateSubmission(id, updates = {}) {
+    const sets = [];
+    const vals = [];
+
+    if (updates.status !== undefined) {
+      sets.push('status = ?');
+      vals.push(updates.status);
+    }
+    if (updates.messageId !== undefined) {
+      sets.push('message_id = ?');
+      vals.push(updates.messageId);
+    }
+    if (updates.executionId !== undefined) {
+      sets.push('execution_id = ?');
+      vals.push(updates.executionId);
+    }
+    if (updates.sessionId !== undefined) {
+      sets.push('session_id = ?');
+      vals.push(updates.sessionId);
+    }
+    if (updates.artifactPath !== undefined) {
+      sets.push('artifact_path = ?');
+      vals.push(updates.artifactPath);
+    }
+    if (updates.metadata !== undefined) {
+      sets.push('metadata_json = ?');
+      vals.push(JSON.stringify(updates.metadata));
+    }
+
+    sets.push("updated_at = datetime('now')");
+    vals.push(id);
+
+    const sql = `UPDATE discord_submissions SET ${sets.join(', ')} WHERE id = ?`;
+    this.db.prepare(sql).run(...vals);
+    return this.getSubmission(id);
+  }
+
+  // Multipart Prompt tracking methods
+  startMultipartPrompt({ id, guildId, channelId, userId, projectId = null }) {
+    // Cancel any existing collecting prompts for this user in this channel
+    this.db.prepare(
+      "UPDATE discord_multipart_prompts SET status = 'cancelled', updated_at = datetime('now') WHERE guild_id = ? AND channel_id = ? AND user_id = ? AND status = 'collecting'"
+    ).run(guildId, channelId, userId);
+
+    const stmt = this.db.prepare(`
+      INSERT INTO discord_multipart_prompts
+      (id, guild_id, channel_id, user_id, project_id, status, total_chunks, total_bytes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'collecting', 0, 0, datetime('now'), datetime('now'))
+    `);
+    stmt.run(id, guildId, channelId, userId, projectId);
+    return this.getMultipartPrompt(id);
+  }
+
+  getActiveMultipartPrompt({ guildId, channelId, userId }) {
+    return this.db.prepare(
+      "SELECT * FROM discord_multipart_prompts WHERE guild_id = ? AND channel_id = ? AND user_id = ? AND status = 'collecting' ORDER BY created_at DESC LIMIT 1"
+    ).get(guildId, channelId, userId);
+  }
+
+  getMultipartPrompt(id) {
+    return this.db.prepare('SELECT * FROM discord_multipart_prompts WHERE id = ?').get(id);
+  }
+
+  addMultipartChunk({ id, multipartPromptId, chunkIndex, discordMessageId = null, content }) {
+    const byteLength = Buffer.byteLength(content, 'utf8');
+    const stmt = this.db.prepare(`
+      INSERT INTO discord_multipart_chunks
+      (id, multipart_prompt_id, chunk_index, discord_message_id, content, byte_length, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+    `);
+    stmt.run(id, multipartPromptId, chunkIndex, discordMessageId, content, byteLength);
+
+    this.db.prepare(`
+      UPDATE discord_multipart_prompts
+      SET total_chunks = total_chunks + 1,
+          total_bytes = total_bytes + ?,
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(byteLength, multipartPromptId);
+
+    return this.getMultipartPrompt(multipartPromptId);
+  }
+
+  getMultipartChunks(multipartPromptId) {
+    return this.db.prepare(
+      'SELECT * FROM discord_multipart_chunks WHERE multipart_prompt_id = ? ORDER BY chunk_index ASC'
+    ).all(multipartPromptId);
+  }
+
+  submitMultipartPrompt(id, artifactPath = null) {
+    this.db.prepare(
+      "UPDATE discord_multipart_prompts SET status = 'submitted', artifact_path = ?, updated_at = datetime('now') WHERE id = ?"
+    ).run(artifactPath, id);
+    return this.getMultipartPrompt(id);
+  }
+
+  cancelMultipartPrompt(id) {
+    this.db.prepare(
+      "UPDATE discord_multipart_prompts SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?"
+    ).run(id);
+    return this.getMultipartPrompt(id);
   }
 
   close() {

@@ -88,6 +88,21 @@ All commands are organized under the `/code` command group:
 - Redacts absolute host filesystem paths and displays safe relative slugs.
 - Shows Git remote configuration, default branch, model, session count, and task counts.
 
+#### `/code project repair project:<name/slug/id> confirm:True [repourl:<url>] [branch:<name>]`
+- Safely updates project repository metadata without deleting or mutating existing checkouts on disk.
+- Requires explicit `confirm:True` and admin or project-creator privileges.
+- Resolves workspace remote mismatches when remotes or intended repository URLs change.
+
+#### `/code prompt start [project:<name>]`
+- Begins collecting multipart specification chunks in the current channel.
+- Optionally links collected chunks to an explicit project workspace.
+
+#### `/code prompt submit`
+- Assembles all collected chunks in chronological order, computes SHA-256 integrity hash, stores durable artifact with `0600` permissions, and renders acknowledgment card.
+
+#### `/code prompt cancel`
+- Cancels an in-progress multipart specification collection and cleans up staged chunks.
+
 #### `/code projects [page:<num>]`
 - Lists available coding workspaces. Automatically filters out test projects (`is_test = 0`).
 - Displays relative slugs, Git remote status (`Configured` / `Not configured`), and default model without leaking host directories.
@@ -96,7 +111,7 @@ All commands are organized under the `/code` command group:
 - Submits an individual task to the execution queue for a project workspace.
 
 #### `/code job project:<name> [prompt:<text>] [attachment:<file>]`
-- Submits a multi-agent workflow with automated planning, parallel workers, independent auditors, and integration steps. Supports `.txt` and `.md` prompt attachments up to 1MB.
+- Submits a multi-agent workflow with automated planning, parallel workers, independent auditors, and integration steps. Supports `.txt` and `.md` prompt attachments up to 256KB (`MAX_ATTACHMENT_BYTES`).
 
 #### `/code status id:<id>`
 - Queries real-time status of a running task, multi-agent job, or session.
@@ -148,3 +163,42 @@ Environment variables in `integrations/discord/.env`:
 - **Duplicate Prevention**: Redelivered Discord message IDs in `running` or `completed` states are dropped immediately.
 - **Session Mutex / Serialization**: Multiple concurrent messages targeted to the same session are serialized sequentially in-memory (`serializeSession`) and backend session locks to avoid concurrent OpenCode context corruption.
 - **Startup Reconciliation**: On bridge start or restart, `reconcileRunningMessages()` reconciles any lingering `received`, `queued`, or `running` records to `failed` (`Bridge restart during execution`). Backend `recoverSessions()` resets `active` sessions back to `idle`.
+
+---
+
+## 6. Long Specification Inputs & Attachment Handling
+
+To overcome Discord's 2,000-character single-message ceiling for rich specifications, the bridge supports 4 distinct input methods:
+
+### Supported Input Methods
+1. **Normal Mention**: Direct message mention (`@Agent Coding <prompt>`) for standard conversational prompts.
+2. **Reply with Attachment**: Reply to an existing bot message with a `.txt` or `.md` attachment to continue the session with a long specification.
+3. **Mention with Attachment**: Mention the bot with a `.txt` or `.md` attachment to stage a specification for a fresh standalone session.
+4. **Multipart Prompts (`/code prompt`)**: For specifications sent across multiple chat messages:
+   - Run `/code prompt start [project:<name>]` to open a collection window.
+   - Send specification chunks into the channel.
+   - Run `/code prompt submit` to assemble and stage execution.
+   - Run `/code prompt cancel` to abort collection.
+   - Chunks are stored in SQLite (`discord_multipart_prompts`, `discord_multipart_chunks`) and survive bot restarts.
+
+### Attachment Validation & Security
+- **Extensions**: Only `.txt` and `.md` files are accepted.
+- **Size Bounds**: Maximum `MAX_ATTACHMENT_BYTES` (262,144 bytes / 256KB).
+- **Format Integrity**: UTF-8 only. Non-empty (0 bytes rejected) and binary null byte (`0x00`) detection rejects binaries and compiled files.
+- **Origin Validation**: Downloads restricted to official Discord CDN hosts (`cdn.discordapp.com` and `media.discordapp.net`).
+- **Download Bounds**: Enforces 15-second download timeouts and strict byte consumption bounds.
+- **Storage & Artifacts**: Full prompt text is saved in `data/prompt-artifacts/` with restrictive file permissions (`0600`) and directory permissions (`0700`), accompanied by SHA-256 digests.
+
+### Interactive Lifecycle Cards
+- **Specification Received**: Displays prompt size, chunk/attachment metadata, SHA-256 digest, target project or session, and interactive `[Execute]` and `[Cancel]` buttons.
+- **Cross-User Protection**: Only the submission author or an administrator can trigger `[Execute]` or `[Cancel]`. Other users receive `❌ Only the submission author can execute or cancel this specification.`
+- **Execution Started**: Replaces buttons with real-time status and submission tracking ID.
+- **Execution Result**: Renders final output inline (<= 2,000 characters) or attaches a sanitized `.txt` file for large outputs.
+
+---
+
+## 7. Workspace Safety & Critical Ballo Safeguards
+
+- **Identity & Remote Verification**: Before running tasks, multi-agent jobs, or creating project sessions, the backend verifies that the local workspace git remote origin matches the registered project identity.
+- **Ballo Protection**: Project `ballo` requires its intended Go repository `https://github.com/lukman-ss/ballo`. If the local workspace points to `codeorchestrator` or any non-Ballo repository, execution is blocked immediately without filesystem mutation or checkout deletion.
+- **Safe Repair Workflow**: When remotes or project configurations change, administrators can invoke `/code project repair project:<id> confirm:True [repourl:<url>]` to update database metadata cleanly without altering or deleting existing files on disk.

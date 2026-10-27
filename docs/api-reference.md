@@ -89,7 +89,7 @@ curl -X DELETE http://127.0.0.1:4000/sessions/<SESSION_ID> -H "Authorization: Be
 ```
 
 ### `POST /sessions/:id/messages`
-Executes an interactive turn with real OpenCode continuation and per-session concurrency mutex lock. Rejects executions on closed sessions with HTTP 409 Conflict. Requests targeted to the same session ID are serialized sequentially.
+Executes an interactive turn with real OpenCode continuation and per-session concurrency mutex lock. Rejects executions on closed sessions with HTTP 409 Conflict. Requests targeted to the same session ID are serialized sequentially. Supports prompts up to 1,000,000 characters; prompts exceeding 32KB stream directly via stdin to prevent Linux `MAX_ARG_STRLEN` (128KB) truncation or errors.
 
 ```bash
 curl -X POST http://127.0.0.1:4000/sessions/<SESSION_ID>/messages \
@@ -201,6 +201,31 @@ curl -X POST http://127.0.0.1:4000/projects/<PROJECT_ID>/sessions \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{ "title": "Refactoring Session" }'
+```
+
+### `GET /projects/:id/validate`
+Validates that the project workspace directory exists, inspects the current Git remote origin, detects the technology stack, and checks against target repository identity (including critical Ballo workspace checks).
+
+```bash
+curl http://127.0.0.1:4000/projects/<PROJECT_ID>/validate -H "Authorization: Bearer <TOKEN>"
+```
+
+### `POST /projects/:id/repair`
+Safely updates project repository metadata without deleting or mutating existing checkouts on disk.
+
+Parameters:
+- `confirm` (boolean, required): Must be `true`.
+- `repoUrl` (string, optional): Correct GitHub repository URL.
+- `defaultBranch` (string, optional): Default branch override.
+
+```bash
+curl -X POST http://127.0.0.1:4000/projects/<PROJECT_ID>/repair \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repoUrl": "https://github.com/lukman-ss/ballo.git",
+    "confirm": true
+  }'
 ```
 
 ### `GET /projects/:id/sessions`

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import * as ss from '../services/session-service.js';
 import * as ts from '../services/task-service.js';
+import { MAX_PROMPT_LENGTH } from '../config.js';
 
 const createSessionSchema = z.object({
   title: z.string().optional(),
@@ -27,7 +28,7 @@ const patchSessionSchema = z.object({
 });
 
 const messageSchema = z.object({
-  prompt: z.string().min(1).max(10000),
+  prompt: z.string().min(1).max(MAX_PROMPT_LENGTH),
   model: z.string().nullish(),
   userId: z.string().nullish()
 });

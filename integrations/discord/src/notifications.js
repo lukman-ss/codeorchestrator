@@ -13,6 +13,7 @@ import {
   safeChannelSend,
   safeMessageEdit
 } from './message-formatter.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder } from 'discord.js';
 
 export {
   DISCORD_LIMITS,
@@ -260,6 +261,83 @@ export const formatFinalReport = (report, job = null) => {
   };
 };
 
+export const formatSpecificationCard = (submission, { projectSlug = '', filename = '' } = {}) => {
+  const sizeKb = (submission.prompt_length / 1024).toFixed(1);
+  const targetDesc = projectSlug ? `Project: \`${projectSlug}\`` : (submission.session_id ? `Session: \`${submission.session_id.slice(0, 8)}...\`` : 'Standalone Session');
+  const sourceDesc = filename ? `File: \`${filename}\`` : (submission.input_method === 'multipart_prompt' ? 'Multipart Prompt' : 'Direct Attachment');
+
+  const content = redactSensitive([
+    '### 📋 Specification Received',
+    `**Input**: ${sourceDesc}`,
+    `**Size**: ${submission.prompt_length} bytes (${sizeKb} KB)`,
+    `**SHA-256**: \`${submission.prompt_hash}\``,
+    `**Target**: ${targetDesc}`,
+    '',
+    'Click **Execute** to run this specification, or **Cancel** to abort.'
+  ].join('\n'));
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`btn_sub_exec_${submission.id}`)
+      .setLabel('Execute')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`btn_sub_cancel_${submission.id}`)
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  return {
+    content,
+    components: [row]
+  };
+};
+
+export const formatExecutionStartedCard = (submission, { projectSlug = '' } = {}) => {
+  const targetDesc = projectSlug ? `Project: \`${projectSlug}\`` : (submission.session_id ? `Session: \`${submission.session_id.slice(0, 8)}...\`` : 'Standalone Session');
+  return {
+    content: redactSensitive([
+      '### 🚀 Execution Started',
+      `**Target**: ${targetDesc}`,
+      `**Submission ID**: \`${submission.id}\``,
+      submission.execution_id ? `**Execution ID**: \`${submission.execution_id}\`` : '',
+      `**Status**: Running...`
+    ].filter(Boolean).join('\n')),
+    components: []
+  };
+};
+
+export const formatExecutionResultCard = (submission, result, { projectSlug = '' } = {}) => {
+  const status = result?.status || (result?.error ? 'failed' : 'completed');
+  const isPass = status === 'completed' || (!result?.error && result?.status !== 'failed');
+  const icon = isPass ? '✅' : '❌';
+  const responseText = result?.response || result?.output || result?.error || '_(No response returned)_';
+  const sanitized = redactSensitive(responseText);
+
+  const header = [
+    `### ${icon} Execution ${isPass ? 'Completed' : 'Failed'}`,
+    `**Submission ID**: \`${submission.id}\``,
+    submission.execution_id ? `**Execution ID**: \`${submission.execution_id}\`` : '',
+    `**Status**: ${status}`
+  ].filter(Boolean).join('\n');
+
+  if (sanitized.length > 1500) {
+    const attachment = new AttachmentBuilder(Buffer.from(sanitized, 'utf8'), {
+      name: `execution-${submission.id.slice(0, 8)}.txt`
+    });
+    return {
+      content: `${header}\n\n*(Full execution response attached due to length)*`,
+      components: [],
+      files: [attachment]
+    };
+  }
+
+  return {
+    content: `${header}\n\n\`\`\`\n${sanitized}\n\`\`\``,
+    components: []
+  };
+};
+
 export default {
   DISCORD_LIMITS,
   redactSensitive,
@@ -268,6 +346,9 @@ export default {
   formatTaskCard,
   formatAuditReport,
   formatFinalReport,
+  formatSpecificationCard,
+  formatExecutionStartedCard,
+  formatExecutionResultCard,
   splitTextIntoChunks,
   validateEmbed,
   validateEmbeds,

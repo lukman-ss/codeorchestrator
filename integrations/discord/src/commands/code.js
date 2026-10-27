@@ -9,16 +9,21 @@ import {
   TextInputStyle
 } from 'discord.js';
 import { randomUUID } from 'node:crypto';
+import { readFileSync, existsSync } from 'node:fs';
 import apiClient from '../api-client.js';
 import auth from '../authorization.js';
 import persistence from '../persistence.js';
 import config from '../config.js';
 import { generateSlug, validateGitHubUrl } from '../../../../src/services/project-service.js';
+import { downloadAndValidateAttachment, savePromptArtifact } from '../attachment-service.js';
 import {
   formatJobCard,
   formatTaskCard,
   formatAuditReport,
   formatFinalReport,
+  formatSpecificationCard,
+  formatExecutionStartedCard,
+  formatExecutionResultCard,
   redactSensitive,
   safeMentions,
   safeEditReply,
@@ -75,6 +80,63 @@ export const data = new SlashCommandBuilder()
               .setRequired(true)
               .setAutocomplete(true)
           )
+      )
+      .addSubcommand(sub =>
+        sub
+          .setName('repair')
+          .setDescription('Repair project workspace metadata or remote configuration')
+          .addStringOption(opt =>
+            opt
+              .setName('project')
+              .setDescription('Project name, slug, or ID')
+              .setRequired(true)
+              .setAutocomplete(true)
+          )
+          .addBooleanOption(opt =>
+            opt
+              .setName('confirm')
+              .setDescription('Confirm configuration update')
+              .setRequired(true)
+          )
+          .addStringOption(opt =>
+            opt
+              .setName('repourl')
+              .setDescription('Correct GitHub repository URL')
+              .setRequired(false)
+          )
+          .addStringOption(opt =>
+            opt
+              .setName('branch')
+              .setDescription('Default branch')
+              .setRequired(false)
+          )
+      )
+  )
+  .addSubcommandGroup(group =>
+    group
+      .setName('prompt')
+      .setDescription('Multipart prompt specification management')
+      .addSubcommand(sub =>
+        sub
+          .setName('start')
+          .setDescription('Start collecting multipart specification chunks in this channel')
+          .addStringOption(opt =>
+            opt
+              .setName('project')
+              .setDescription('Target project (optional)')
+              .setRequired(false)
+              .setAutocomplete(true)
+          )
+      )
+      .addSubcommand(sub =>
+        sub
+          .setName('submit')
+          .setDescription('Submit collected chunks as a complete specification')
+      )
+      .addSubcommand(sub =>
+        sub
+          .setName('cancel')
+          .setDescription('Cancel active multipart prompt collection')
       )
   )
   .addSubcommand(sub =>
@@ -457,6 +519,14 @@ export async function execute(interaction, eventListener = null) {
         return await handleProjectImport(interaction, userId, memberRoles);
       case 'project:info':
         return await handleProjectInfo(interaction, userId, memberRoles);
+      case 'project:repair':
+        return await handleProjectRepair(interaction, userId, memberRoles);
+      case 'prompt:start':
+        return await handlePromptStart(interaction, userId, memberRoles);
+      case 'prompt:submit':
+        return await handlePromptSubmit(interaction, userId, memberRoles);
+      case 'prompt:cancel':
+        return await handlePromptCancel(interaction, userId, memberRoles);
       case 'projects':
         return await handleProjects(interaction, userId, memberRoles);
       case 'sessions':
@@ -575,6 +645,211 @@ async function handleProjectInfo(interaction, userId, memberRoles) {
   }, { type: 'project_info' });
 }
 
+async function handleProjectRepair(interaction, userId, memberRoles) {
+  const projectInput = interaction.options.getString('project', true);
+  const repoUrl = interaction.options.getString('repourl');
+  const branch = interaction.options.getString('branch');
+  const confirm = interaction.options.getBoolean('confirm', true);
+
+  if (!confirm) {
+    return safeEditReply(interaction, {
+      content: '❌ Explicit confirmation (`confirm: true`) is required to repair project configuration.',
+      allowedMentions: safeMentions
+    }, { type: 'repair_error' });
+  }
+
+  const project = await apiClient.resolveProject(projectInput);
+  if (!project) {
+    return safeEditReply(interaction, {
+      content: `❌ Project \`${projectInput}\` not found in CodeOrchestrator.`,
+      allowedMentions: safeMentions
+    }, { type: 'repair_error' });
+  }
+
+  if (!auth.isProjectAllowedForUser(userId, memberRoles, project)) {
+    return safeEditReply(interaction, {
+      content: `❌ Access Denied: You do not have permission to configure project \`${project.slug}\`.`,
+      allowedMentions: safeMentions
+    }, { type: 'auth_denied' });
+  }
+
+  try {
+    const updated = await apiClient.repairProject(project.id, {
+      repoUrl: repoUrl || undefined,
+      defaultBranch: branch || undefined,
+      confirm: true
+    });
+
+    const lines = [
+      '✅ **Project Repaired Successfully**',
+      '',
+      `• **Project**: **${updated.name}** (\`${updated.slug}\`)`,
+      `• **Configured Remote**: \`${updated.repo_url || updated.repository_url || 'N/A'}\``,
+      `• **Default Branch**: \`${updated.default_branch || 'main'}\``,
+      `• **Repaired At**: \`${updated.metadata?.repairedAt || 'now'}\``,
+      '',
+      'ℹ️ *Note: Workspace filesystem checkout was safely preserved without disk deletion or silent remote mutation.*'
+    ];
+
+    return safeEditReply(interaction, {
+      content: redactSensitive(lines.join('\n')),
+      allowedMentions: safeMentions
+    }, { type: 'repair_success' });
+  } catch (err) {
+    return safeEditReply(interaction, {
+      content: redactSensitive(`❌ **Repair Failed**: ${err.message}`),
+      allowedMentions: safeMentions
+    }, { type: 'repair_error' });
+  }
+}
+
+async function handlePromptStart(interaction, userId, memberRoles) {
+  const projectInput = interaction.options.getString('project');
+  let targetProjectId = null;
+  let targetProjectSlug = null;
+
+  if (projectInput) {
+    const project = await apiClient.resolveProject(projectInput);
+    if (!project) {
+      return safeEditReply(interaction, {
+        content: `❌ Project \`${projectInput}\` not found in CodeOrchestrator.`,
+        allowedMentions: safeMentions
+      }, { type: 'prompt_error' });
+    }
+    if (!auth.isProjectAllowedForUser(userId, memberRoles, project)) {
+      return safeEditReply(interaction, {
+        content: `❌ Access Denied: You do not have permission on project \`${project.slug}\`.`,
+        allowedMentions: safeMentions
+      }, { type: 'auth_denied' });
+    }
+    targetProjectId = project.id;
+    targetProjectSlug = project.slug;
+  }
+
+  const mpId = randomUUID();
+  persistence.startMultipartPrompt({
+    id: mpId,
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    userId,
+    projectId: targetProjectId
+  });
+
+  const lines = [
+    '📝 **Multipart Specification Started**',
+    '',
+    `• **ID**: \`${mpId}\``,
+    `• **Target**: ${targetProjectSlug ? `Project \`${targetProjectSlug}\`` : 'Standalone Session'}`,
+    '',
+    'Send your specification messages or `.txt`/`.md` attachments in this channel. They will be collected sequentially.',
+    'When finished, run `/code prompt submit`. To cancel, run `/code prompt cancel`.'
+  ];
+
+  return safeEditReply(interaction, {
+    content: redactSensitive(lines.join('\n')),
+    allowedMentions: safeMentions
+  }, { type: 'prompt_start' });
+}
+
+async function handlePromptSubmit(interaction, userId, memberRoles) {
+  const activeMp = persistence.getActiveMultipartPrompt({
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    userId
+  });
+
+  if (!activeMp) {
+    return safeEditReply(interaction, {
+      content: '❌ No active multipart prompt collection in this channel. Run `/code prompt start` first.',
+      allowedMentions: safeMentions
+    }, { type: 'prompt_error' });
+  }
+
+  const chunks = persistence.getMultipartChunks(activeMp.id);
+  if (!chunks || chunks.length === 0) {
+    return safeEditReply(interaction, {
+      content: '❌ No prompt chunks were received. Send at least one chunk in this channel before submitting, or run `/code prompt cancel`.',
+      allowedMentions: safeMentions
+    }, { type: 'prompt_error' });
+  }
+
+  const assembledPrompt = chunks.map(c => c.content).join('\n\n');
+  const buffer = Buffer.from(assembledPrompt, 'utf8');
+
+  if (buffer.length === 0) {
+    return safeEditReply(interaction, {
+      content: '❌ Assembled specification is empty.',
+      allowedMentions: safeMentions
+    }, { type: 'prompt_error' });
+  }
+
+  if (buffer.includes(0)) {
+    return safeEditReply(interaction, {
+      content: '❌ Assembled specification contains invalid binary or null bytes.',
+      allowedMentions: safeMentions
+    }, { type: 'prompt_error' });
+  }
+
+  const artifact = savePromptArtifact(buffer, 'multipart-specification.md');
+  persistence.submitMultipartPrompt(activeMp.id, artifact.artifactPath);
+
+  let project = null;
+  if (activeMp.project_id) {
+    project = await apiClient.getProject(activeMp.project_id).catch(() => null);
+  }
+
+  const subId = randomUUID();
+  const submission = persistence.saveSubmission({
+    id: subId,
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    userId,
+    submissionType: 'multipart',
+    inputMethod: 'multipart_prompt',
+    projectId: activeMp.project_id,
+    promptHash: artifact.sha256,
+    promptLength: artifact.sizeBytes,
+    artifactPath: artifact.artifactPath,
+    status: 'received',
+    metadata: {
+      totalChunks: chunks.length,
+      multipartPromptId: activeMp.id
+    }
+  });
+
+  const card = formatSpecificationCard(submission, {
+    projectSlug: project?.slug,
+    filename: `multipart (${chunks.length} chunks)`
+  });
+
+  const replyMsg = await safeEditReply(interaction, card, { type: 'prompt_submitted' });
+  if (replyMsg?.id) {
+    persistence.updateSubmission(subId, { messageId: replyMsg.id });
+  }
+  return replyMsg;
+}
+
+async function handlePromptCancel(interaction, userId, memberRoles) {
+  const activeMp = persistence.getActiveMultipartPrompt({
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    userId
+  });
+
+  if (!activeMp) {
+    return safeEditReply(interaction, {
+      content: '❌ No active multipart prompt collection in this channel to cancel.',
+      allowedMentions: safeMentions
+    }, { type: 'prompt_error' });
+  }
+
+  persistence.cancelMultipartPrompt(activeMp.id);
+  return safeEditReply(interaction, {
+    content: '🚫 Multipart specification collection cancelled.',
+    allowedMentions: safeMentions
+  }, { type: 'prompt_cancelled' });
+}
+
 export async function handleModalSubmit(interaction) {
   if (interaction.customId === 'modal_project_create') {
     const userId = interaction.user?.id || interaction.userId;
@@ -666,6 +941,124 @@ export async function handleModalSubmit(interaction) {
 export async function handleButton(interaction) {
   const customId = interaction.customId;
   const userId = interaction.user?.id || interaction.userId;
+
+  if (customId.startsWith('btn_sub_cancel_')) {
+    const subId = customId.replace('btn_sub_cancel_', '');
+    const submission = persistence.getSubmission(subId);
+    if (!submission) {
+      return safeReply(interaction, { content: '⚠️ Submission not found or expired.', ephemeral: true });
+    }
+    const memberRoles = interaction.member?.roles?.cache
+      ? Array.from(interaction.member.roles.cache.keys())
+      : Array.isArray(interaction.member?.roles) ? interaction.member.roles : [];
+    const isAdmin = auth.isAdmin(userId, memberRoles);
+    if (submission.user_id !== userId && !isAdmin) {
+      return safeReply(interaction, { content: '❌ Only the submitter or an administrator can cancel this specification.', ephemeral: true });
+    }
+    persistence.updateSubmission(subId, { status: 'cancelled' });
+    return interaction.update({
+      content: '🚫 Specification execution cancelled.',
+      components: []
+    });
+  }
+
+  if (customId.startsWith('btn_sub_exec_')) {
+    const subId = customId.replace('btn_sub_exec_', '');
+    const submission = persistence.getSubmission(subId);
+    if (!submission) {
+      return safeReply(interaction, { content: '⚠️ Submission not found or expired.', ephemeral: true });
+    }
+    const memberRoles = interaction.member?.roles?.cache
+      ? Array.from(interaction.member.roles.cache.keys())
+      : Array.isArray(interaction.member?.roles) ? interaction.member.roles : [];
+    const isAdmin = auth.isAdmin(userId, memberRoles);
+    if (submission.user_id !== userId && !isAdmin) {
+      return safeReply(interaction, { content: '❌ Only the submitter or an administrator can execute this specification.', ephemeral: true });
+    }
+    if (submission.status !== 'received' && submission.status !== 'confirmed') {
+      return safeReply(interaction, { content: `⚠️ This specification is already in state '${submission.status}'.`, ephemeral: true });
+    }
+
+    // Workspace validation check before mutation if project is targeted!
+    let project = null;
+    if (submission.project_id) {
+      try {
+        project = await apiClient.getProject(submission.project_id);
+        const wsCheck = await apiClient.validateProject(submission.project_id);
+        if (!wsCheck.valid) {
+          persistence.updateSubmission(subId, { status: 'failed' });
+          return interaction.update({
+            content: redactSensitive(`❌ **Workspace Validation Failed**: ${wsCheck.error}`),
+            components: []
+          });
+        }
+      } catch (err) {
+        persistence.updateSubmission(subId, { status: 'failed' });
+        return interaction.update({
+          content: redactSensitive(`❌ **Workspace Error**: ${err.message}`),
+          components: []
+        });
+      }
+    }
+
+    persistence.updateSubmission(subId, { status: 'executing' });
+
+    let promptContent = '';
+    if (submission.artifact_path && existsSync(submission.artifact_path)) {
+      promptContent = readFileSync(submission.artifact_path, 'utf8');
+    } else {
+      promptContent = submission.metadata?.prompt || '';
+    }
+
+    const startCard = formatExecutionStartedCard(submission, { projectSlug: project?.slug });
+    await interaction.update(startCard);
+
+    try {
+      let executionResult = null;
+      if (submission.submission_type === 'job' && submission.project_id) {
+        const job = await apiClient.createJob(submission.project_id, promptContent);
+        persistence.updateSubmission(subId, { executionId: job.id, status: 'completed' });
+        executionResult = { status: 'queued', output: `Job created with ID: ${job.id}` };
+      } else if (submission.session_id) {
+        const msgRes = await apiClient.sendSessionMessage(submission.session_id, {
+          prompt: promptContent,
+          userId
+        });
+        persistence.updateSubmission(subId, { status: 'completed' });
+        executionResult = { status: 'completed', response: msgRes?.response };
+      } else if (submission.project_id) {
+        const task = await apiClient.createTask(submission.project_id, {
+          prompt: promptContent,
+          sessionId: submission.session_id
+        });
+        persistence.updateSubmission(subId, { executionId: task.id, status: 'completed' });
+        executionResult = { status: 'queued', output: `Task queued with ID: ${task.id}` };
+      } else {
+        const session = await apiClient.createSession({
+          title: promptContent.slice(0, 50).trim() || 'Specification Execution',
+          type: 'standalone',
+          userId
+        });
+        persistence.updateSubmission(subId, { sessionId: session.id });
+        const msgRes = await apiClient.sendSessionMessage(session.id, {
+          prompt: promptContent,
+          userId
+        });
+        persistence.updateSubmission(subId, { status: 'completed' });
+        executionResult = { status: 'completed', response: msgRes?.response };
+      }
+
+      const resultCard = formatExecutionResultCard(submission, executionResult, { projectSlug: project?.slug });
+      await interaction.editReply(resultCard);
+    } catch (err) {
+      persistence.updateSubmission(subId, { status: 'failed' });
+      await interaction.editReply({
+        content: redactSensitive(`❌ **Execution Failed**: ${err.message}`),
+        components: []
+      });
+    }
+    return;
+  }
 
   if (customId.startsWith('btn_proj_cancel:')) {
     const pendingId = customId.replace('btn_proj_cancel:', '');
@@ -1380,40 +1773,15 @@ async function handleJob(interaction, userId, memberRoles, eventListener) {
   }
 
   if (attachment) {
-    const filename = attachment.name.toLowerCase();
-    if (!filename.endsWith('.txt') && !filename.endsWith('.md')) {
+    try {
+      const downloaded = await downloadAndValidateAttachment(attachment);
+      prompt = prompt ? `${prompt}\n\n${downloaded.content}` : downloaded.content;
+    } catch (err) {
       return safeEditReply(interaction, {
-        content: '❌ Invalid file type: Only `.txt` and `.md` UTF-8 specification attachments are supported.',
+        content: `❌ ${err.message}`,
         allowedMentions: safeMentions
       }, { type: 'job_error' });
     }
-
-    if (attachment.size > config.maxAttachmentBytes) {
-      return safeEditReply(interaction, {
-        content: `❌ File too large (${Math.round(attachment.size / 1024)}KB). Maximum allowed size is ${Math.round(config.maxAttachmentBytes / 1024)}KB.`,
-        allowedMentions: safeMentions
-      }, { type: 'job_error' });
-    }
-
-    const fileRes = await fetch(attachment.url);
-    if (!fileRes.ok) {
-      return safeEditReply(interaction, {
-        content: '❌ Failed to download prompt attachment from Discord.',
-        allowedMentions: safeMentions
-      }, { type: 'job_error' });
-    }
-
-    const buf = await fileRes.arrayBuffer();
-    const bytes = new Uint8Array(buf);
-    if (bytes.includes(0)) {
-      return safeEditReply(interaction, {
-        content: '❌ Attachment contains invalid binary or null bytes.',
-        allowedMentions: safeMentions
-      }, { type: 'job_error' });
-    }
-
-    const fileContent = Buffer.from(buf).toString('utf8');
-    prompt = prompt ? `${prompt}\n\n${fileContent}` : fileContent;
   }
 
   const project = await apiClient.resolveProject(projectInput);
@@ -1689,6 +2057,18 @@ async function handleHelp(interaction) {
     '',
     '`/code project info project:<name|slug|id>`',
     'View detailed project metadata, Git status, session counts, and stack.',
+    '',
+    '`/code project repair project:<name|slug|id> [repourl:<url>] [branch:<name>] confirm:True`',
+    'Repair project workspace metadata or remote configuration safely without checkout deletion.',
+    '',
+    '`/code prompt start [project:<name>]`',
+    'Start collecting multipart specification chunks in this channel.',
+    '',
+    '`/code prompt submit`',
+    'Assemble and submit collected specification chunks as a complete prompt.',
+    '',
+    '`/code prompt cancel`',
+    'Cancel active multipart specification collection.',
     '',
     '`/code chat prompt:<text> [session:<id>] [model:<model>]`',
     'Start or continue a standalone conversation without selecting a project.',

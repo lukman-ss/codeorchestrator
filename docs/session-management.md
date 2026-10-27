@@ -76,6 +76,15 @@ On continuation turn:
 1. Orchestrator passes `-s <opencode_session_id>` to `opencode run`.
 2. OpenCode loads full conversation context, preserving memory of prior exchanges across commands.
 
+### Large Specification Streaming (stdin)
+
+Standard Linux kernels impose a strict `MAX_ARG_STRLEN` limit (128KB) on single command-line arguments. Prompts approaching or exceeding this limit fail with `E2BIG (Argument list too long)`.
+
+To support specifications up to 1,000,000 characters:
+- Prompts <= 32KB (`32,768` bytes) are passed as CLI arguments to `opencode run <prompt>`.
+- Prompts > 32KB are piped directly to OpenCode process `stdin` with stream termination (`child.stdin.end()`), avoiding CLI argument limits completely.
+- Prompt artifacts are saved to `data/prompt-artifacts/` with `0600` permissions (directory `0700`) and tracked with SHA-256 integrity digests.
+
 ---
 
 ## 4. Per-Session Concurrency Control

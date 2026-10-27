@@ -4,6 +4,7 @@ import * as ts from '../services/task-service.js';
 import * as ss from '../services/session-service.js';
 import * as po from '../services/project-operations.js';
 import { enqueueTask } from '../services/task-queue.js';
+import { MAX_PROMPT_LENGTH } from '../config.js';
 
 const projectSchema = z.object({
   name: z.string().min(1),
@@ -23,7 +24,7 @@ const projectSchema = z.object({
 });
 
 const taskSchema = z.object({
-  prompt: z.string().min(1).max(10000),
+  prompt: z.string().min(1).max(MAX_PROMPT_LENGTH),
   model: z.string().nullish(),
   sessionId: z.string().uuid().nullish()
 });
@@ -78,6 +79,26 @@ export default async function projects(app) {
   app.patch('/:id', async (req, reply) => {
     try {
       reply.send(ps.updateProject(req.params.id, req.body));
+    } catch (e) {
+      reply.code(404).send({ error: e.message });
+    }
+  });
+
+  app.post('/:id/repair', async (req, reply) => {
+    try {
+      const { repoUrl, defaultBranch, confirm } = req.body || {};
+      const result = ps.repairProject(req.params.id, { repoUrl, defaultBranch, confirm, userId: req.user?.id });
+      reply.send(result);
+    } catch (e) {
+      reply.code(400).send({ error: e.message });
+    }
+  });
+
+  app.get('/:id/validate', async (req, reply) => {
+    try {
+      const project = ps.getProject(req.params.id);
+      const result = ps.validateProjectWorkspace(project, req.query || {});
+      reply.send(result);
     } catch (e) {
       reply.code(404).send({ error: e.message });
     }

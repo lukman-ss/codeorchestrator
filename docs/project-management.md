@@ -147,3 +147,52 @@ To list sessions attached to a specific project:
 curl http://127.0.0.1:4000/projects/<PROJECT_ID>/sessions \
   -H "Authorization: Bearer <TOKEN>"
 ```
+
+---
+
+## Workspace Validation & Integrity Guards
+
+To protect existing project checkouts from unintended execution or overwrites, CodeOrchestrator validates workspace Git configuration before executing tasks, multi-agent jobs, or creating project-scoped sessions.
+
+### 1. Workspace Validation (`GET /projects/:id/validate`)
+
+```bash
+curl http://127.0.0.1:4000/projects/<PROJECT_ID>/validate \
+  -H "Authorization: Bearer <TOKEN>"
+```
+
+Returns:
+```json
+{
+  "valid": true,
+  "actualRemote": "https://github.com/org/repo.git",
+  "stack": "Node.js / JavaScript"
+}
+```
+
+### 2. Critical Ballo Repository Protection
+
+Project `ballo` has strict provenance enforcement:
+- Intended repository: `https://github.com/lukman-ss/ballo` (Go).
+- If the local checkout remote points to `codeorchestrator` or any non-Ballo repository, execution is blocked immediately with a descriptive error:
+  `Repository mismatch detected: Project 'ballo' workspace remote is '...' but intended repository is 'https://github.com/lukman-ss/ballo' (Go). Execution blocked to protect workspace integrity. Explicit authorized correction required.`
+- No local files are mutated or deleted during validation failure.
+
+### 3. Safe Project Repair (`POST /projects/:id/repair`)
+
+When workspace remotes or intended repository URLs change, project metadata can be repaired without deleting checkouts or silently altering remote configuration on disk:
+
+```bash
+curl -X POST http://127.0.0.1:4000/projects/<PROJECT_ID>/repair \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repoUrl": "https://github.com/lukman-ss/ballo.git",
+    "defaultBranch": "main",
+    "confirm": true
+  }'
+```
+
+- Requires `"confirm": true`.
+- Updates database metadata record (`repository_url`, `default_branch`, `metadata.expectedRepoUrl`, `metadata.repairedAt`).
+- Preserves the local filesystem checkout intact.
