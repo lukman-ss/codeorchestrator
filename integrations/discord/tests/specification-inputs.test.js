@@ -876,3 +876,29 @@ test('29. Cross-user authorization: user B cannot execute or cancel user A speci
   const sub = defaultPersistence.getSubmission(subId);
   assert.equal(sub.status, 'received');
 });
+
+test('30. Regression: Starter template URL in prompt or attachment does not trigger repository mismatch', async () => {
+  const persistence = new PersistenceStore(':memory:');
+  const apiClient = createMockApiClient();
+  apiClient.projects.set('ballo-todo', {
+    id: 'proj-ballo-todo',
+    slug: 'ballo-todo',
+    repo_url: 'git@github.com:lukman-ss/ballo-todo.git'
+  });
+  const auth = createMockAuth();
+  const client = { user: { id: 'bot-agent-coding' } };
+
+  // Prompt mentions starter repository as reference foundation
+  const msg = createMockDiscordMessage({
+    isMention: true,
+    content: '<@bot-agent-coding>\nproject: ballo-todo\nBangun aplikasi web bernama ballo-todo menggunakan Ballo Starter sebagai fondasi: https://github.com/lukman-ss/ballo-starter'
+  });
+
+  const res = await handleMessage(msg, client, apiClient, persistence, auth);
+  assert.ok(res);
+  assert.equal(msg._replies.length, 1);
+  assert.doesNotMatch(msg._replies[0].content, /Repository Mismatch/);
+  assert.match(msg._replies[0].content, /Processed prompt/);
+  persistence.close();
+});
+

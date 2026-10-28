@@ -62,12 +62,18 @@ export function parseProjectDirective(text) {
 
 export function extractRepositoryDirective(text) {
   if (!text || typeof text !== 'string') return null;
-  const directiveMatch = text.match(/(?:^|\r?\n|\s)(?:repository|repo|remote)\s*:\s*(\S+)/i);
-  if (directiveMatch) return directiveMatch[1].trim();
-  const httpsMatch = text.match(/https?:\/\/(?:www\.)?github\.com\/([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+?)(?:\.git)?(?:\s|$|[),])/i);
-  if (httpsMatch) return httpsMatch[0].replace(/[),.]$/, '').trim();
-  const sshMatch = text.match(/git@(github\.com|github-coding):([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+?)(?:\.git)?(?:\s|$|[),])/i);
-  if (sshMatch) return sshMatch[0].replace(/[),.]$/, '').trim();
+  const directiveMatch = text.match(/(?:^|\r?\n|\s)(?:(?:git\s+)?remote|repo|repository)\s*[:=]?\s*(\S+)/i);
+  if (directiveMatch) {
+    const val = directiveMatch[1].trim().replace(/[),.]$/, '');
+    if (val.includes('github') || val.includes('.git')) return val;
+  }
+
+  const trimmed = text.trim();
+  const isStandaloneUrl = /^(https?:\/\/(?:www\.)?github\.com\/\S+|git@(github\.com|github-coding):\S+)$/i.test(trimmed);
+  if (isStandaloneUrl) {
+    return trimmed.replace(/[),.]$/, '');
+  }
+
   return null;
 }
 
@@ -633,7 +639,7 @@ export async function handleMessage(message, client, apiClient, persistence, aut
       targetProjectId = targetProject.id;
     }
 
-    const specRepo = extractRepositoryDirective(combinedText);
+    const specRepo = extractRepositoryDirective(fullPrompt);
     if (targetProject && specRepo && (targetProject.repo_url || targetProject.repository_url)) {
       const repoCheck = checkRepositoryMismatch(specRepo, targetProject.repo_url || targetProject.repository_url);
       if (repoCheck.mismatch) {

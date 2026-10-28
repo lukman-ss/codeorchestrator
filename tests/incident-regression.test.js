@@ -46,6 +46,14 @@ test('Incident A: Repository directive extraction and mismatch check', () => {
   const repo1 = extractRepositoryDirective(text1);
   assert.equal(repo1, 'https://github.com/lukman-ss/ballo-starter.git');
 
+  // Starter template cited in description should not be extracted as repository directive
+  const textWithStarter = 'project: ballo-todo\nBangun aplikasi web bernama ballo-todo menggunakan Ballo Starter sebagai fondasi:\nhttps://github.com/lukman-ss/ballo-starter';
+  assert.equal(extractRepositoryDirective(textWithStarter), null);
+
+  // Standalone repository URL or explicit directive still recognized
+  assert.equal(extractRepositoryDirective('https://github.com/lukman-ss/ballo-starter.git'), 'https://github.com/lukman-ss/ballo-starter.git');
+  assert.equal(extractRepositoryDirective('git@github.com:lukman-ss/ballo-starter.git'), 'git@github.com:lukman-ss/ballo-starter.git');
+
   const checkPass = checkRepositoryMismatch(
     'https://github.com/lukman-ss/ballo-starter.git',
     'git@github.com:lukman-ss/ballo-starter.git'
