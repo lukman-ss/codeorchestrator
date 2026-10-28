@@ -1029,44 +1029,64 @@ export async function handleButton(interaction) {
       return safeReply(interaction, { content: '❌ Only the submitter or an administrator can execute this specification.', ephemeral: true });
     }
     if (submission.status !== 'received' && submission.status !== 'confirmed') {
-      return safeReply(interaction, { content: `⚠️ This specification is already in state '${submission.status}'.`, ephemeral: true });
+      const isStale = submission.status === 'executing' && !submission.execution_id;
+      if (!isStale) {
+        return safeReply(interaction, { content: `⚠️ This specification is already in state '${submission.status}'.`, ephemeral: true });
+      }
     }
 
-    // Workspace validation check before mutation if project is targeted!
-    let project = null;
-    if (submission.project_id) {
-      try {
+    const claimed = persistence.claimSubmissionForExecution(subId);
+    if (!claimed) {
+      return safeReply(interaction, { content: '⚠️ This specification is already being processed or executed.', ephemeral: true });
+    }
+
+    // Acknowledge interaction immediately to prevent Discord 3-second timeout
+    try {
+      if (typeof interaction.update === 'function') {
+        await interaction.update({
+          content: '⏳ Initializing specification execution...',
+          components: []
+        });
+      }
+    } catch (ackErr) {
+      console.warn('[DiscordBridge] Button ack warning:', ackErr.message);
+    }
+
+    try {
+      // Workspace validation check before mutation if project is targeted!
+      let project = null;
+      if (submission.project_id) {
         project = await apiClient.getProject(submission.project_id);
         const wsCheck = await apiClient.validateProject(submission.project_id);
         if (!wsCheck.valid) {
           persistence.updateSubmission(subId, { status: 'failed' });
-          return interaction.update({
+          const valPayload = {
             content: redactSensitive(`❌ **Workspace Validation Failed**: ${wsCheck.error}`),
             components: []
-          });
+          };
+          try {
+            await interaction.editReply(valPayload);
+          } catch {
+            if (interaction.channel?.send) await interaction.channel.send(valPayload).catch(() => {});
+          }
+          return;
         }
-      } catch (err) {
-        persistence.updateSubmission(subId, { status: 'failed' });
-        return interaction.update({
-          content: redactSensitive(`❌ **Workspace Error**: ${err.message}`),
-          components: []
-        });
       }
-    }
 
-    persistence.updateSubmission(subId, { status: 'executing' });
+      let promptContent = '';
+      if (submission.artifact_path && existsSync(submission.artifact_path)) {
+        promptContent = readFileSync(submission.artifact_path, 'utf8');
+      } else {
+        promptContent = submission.metadata?.prompt || '';
+      }
 
-    let promptContent = '';
-    if (submission.artifact_path && existsSync(submission.artifact_path)) {
-      promptContent = readFileSync(submission.artifact_path, 'utf8');
-    } else {
-      promptContent = submission.metadata?.prompt || '';
-    }
+      const startCard = formatExecutionStartedCard(submission, { projectSlug: project?.slug });
+      try {
+        await interaction.editReply(startCard);
+      } catch {
+        if (interaction.channel?.send) await interaction.channel.send(startCard).catch(() => {});
+      }
 
-    const startCard = formatExecutionStartedCard(submission, { projectSlug: project?.slug });
-    await interaction.update(startCard);
-
-    try {
       let executionResult = null;
       if (submission.project_id) {
         if (submission.submission_type === 'job') {
@@ -1291,10 +1311,13 @@ export async function handleButton(interaction) {
     }
   }
 
-  if (customId.startsWith('btn_git_push_') || customId.startsWith('btn_git_keeplocal_') || customId.startsWith('btn_git_reject_')) {
+  if (customId.startsWith('btn_git_pr_') || customId.startsWith('btn_git_push_') || customId.startsWith('btn_git_keeplocal_') || customId.startsWith('btn_git_reject_')) {
     let decision = 'push';
     let approvalId = '';
-    if (customId.startsWith('btn_git_push_')) {
+    if (customId.startsWith('btn_git_pr_')) {
+      decision = 'create_pr';
+      approvalId = customId.replace('btn_git_pr_', '');
+    } else if (customId.startsWith('btn_git_push_')) {
       decision = 'push';
       approvalId = customId.replace('btn_git_push_', '');
     } else if (customId.startsWith('btn_git_keeplocal_')) {
@@ -1319,7 +1342,10 @@ export async function handleButton(interaction) {
       const res = await apiClient.decideApproval(approvalId, { decision, userId });
       const card = formatGitDecisionResultCard(approval, decision, {
         commitSha: res.commitSha,
-        error: res.pushFailed ? res.reason : null
+        prUrl: res.prUrl,
+        prNumber: res.prNumber,
+        branchName: res.branchName,
+        error: (res.pushFailed || res.prFailed) ? res.reason : null
       });
 
       return safeEditReply(interaction, card);

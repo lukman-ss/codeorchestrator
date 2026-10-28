@@ -10,6 +10,11 @@ import { OPENCODE_BIN, NINEROUTER_API_KEY, DEFAULT_MODEL, INTEGRATION_MODEL_OVER
 import logger from '../logger.js';
 import { Supervisor } from './supervisor.js';
 import { WorkflowService } from './workflow-service.js';
+import { GitOperations } from './git-operations.js';
+import { ModelResolver } from './model-resolver.js';
+import { ModelFailover } from './model-failover.js';
+import { ModelRouter } from './model-router.js';
+import { ModelRegistry } from './model-registry.js';
 
 export class RepairAgent {
   static async attemptRepair(subtask) {
@@ -62,13 +67,21 @@ Use OpenCode JSON format output.`;
 
     emitWebSocketEvent('repair.started', subtask, { executionId, role: 'repair' });
 
-    const targetModel = model || DEFAULT_MODEL;
+    const plan = ModelResolver.resolveExecutionPlan({
+      jobId: subtask.job_id,
+      projectId: subtask.project_id,
+      role: 'repair',
+      prompt: repairPrompt,
+      preferredModel: model,
+      preferredEffort: subtask.audit_retry_count > 0 ? 'high' : 'medium'
+    });
+    const targetModel = plan.openCodeModel;
     const args = ['run', '-m', targetModel, '--auto', '--format', 'json'];
     const useStdin = Buffer.byteLength(repairPrompt || '', 'utf8') > 32768;
     if (!useStdin && repairPrompt) {
       args.push(repairPrompt);
     }
-    const env = { ...process.env, NINEROUTER_API_KEY };
+    const env = GitOperations.getWorkerEnv({ NINEROUTER_API_KEY });
 
     const child = spawn(OPENCODE_BIN, args, { cwd: workspacePath, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
     if (useStdin && repairPrompt) {
@@ -175,13 +188,20 @@ export class IntegrationAgent {
 
     const integrationPrompt = `Integrate the verified implementation from ${subtask.worktree_path || project.workspace_path} into the canonical project. Check for conflicts and run project-level verification.`;
 
-    const targetIntegrationModel = integrationModel || DEFAULT_MODEL;
+    const plan = ModelResolver.resolveExecutionPlan({
+      jobId: subtask.job_id,
+      projectId: subtask.project_id,
+      role: 'integration',
+      prompt: integrationPrompt,
+      preferredModel: integrationModel
+    });
+    const targetIntegrationModel = plan.openCodeModel;
     const args = ['run', '-m', targetIntegrationModel, '--auto', '--format', 'json'];
     const useStdin = Buffer.byteLength(integrationPrompt || '', 'utf8') > 32768;
     if (!useStdin && integrationPrompt) {
       args.push(integrationPrompt);
     }
-    const env = { ...process.env, NINEROUTER_API_KEY };
+    const env = GitOperations.getWorkerEnv({ NINEROUTER_API_KEY });
     const child = spawn(OPENCODE_BIN, args, { cwd: project.workspace_path, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
     if (useStdin && integrationPrompt) {
       child.stdin.end(integrationPrompt, 'utf8');
@@ -280,12 +300,20 @@ Failed audits: ${allAudits.length}
 
 Determine if the job should be marked COMPLETE or PARTIALLY_COMPLETED.`;
 
-    const args = ['run', '-m', DEFAULT_MODEL, '--auto', '--format', 'json'];
+    const plan = ModelResolver.resolveExecutionPlan({
+      jobId,
+      projectId: job.project_id,
+      role: 'auditor',
+      prompt,
+      preferredModel: AUDIT_MODEL_OVERRIDE || null
+    });
+    const targetAuditModel = plan.openCodeModel;
+    const args = ['run', '-m', targetAuditModel, '--auto', '--format', 'json'];
     const useStdin = Buffer.byteLength(prompt || '', 'utf8') > 32768;
     if (!useStdin && prompt) {
       args.push(prompt);
     }
-    const env = { ...process.env, NINEROUTER_API_KEY };
+    const env = GitOperations.getWorkerEnv({ NINEROUTER_API_KEY });
     const child = spawn(OPENCODE_BIN, args, { cwd: job.project_id ? '' : process.cwd(), env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
     if (useStdin && prompt) {
       child.stdin.end(prompt, 'utf8');

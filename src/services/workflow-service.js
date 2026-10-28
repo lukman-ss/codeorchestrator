@@ -1,11 +1,17 @@
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { dbGetOne, dbRun, dbGet } from '../database/db.js';
 import { getProject } from './project-service.js';
 import { ImplementationVerifier } from './implementation-verifier.js';
 import { SecurityAuditor } from './security-auditor.js';
 import { GitOperations } from './git-operations.js';
+import { ModelResolver } from './model-resolver.js';
+import { ModelFailover } from './model-failover.js';
+import { ModelRouter } from './model-router.js';
+import { ModelRegistry } from './model-registry.js';
 import { ApprovalService } from './approval-service.js';
 import { emitWebSocketEvent } from '../realtime/event-bus.js';
+import { MAX_REPAIR_ATTEMPTS, OPENCODE_BIN, NINEROUTER_API_KEY, DEFAULT_MODEL } from '../config.js';
 import logger from '../logger.js';
 
 export class WorkflowService {
@@ -26,13 +32,16 @@ export class WorkflowService {
     prompt = '',
     acceptanceCriteria = [],
     baseline = null,
-    taskFiles = []
+    taskFiles = [],
+    autoRepair = false,
+    repairAttempt = 0,
+    maxRepairAttempts = MAX_REPAIR_ATTEMPTS
   }) {
     const reviewId = randomUUID();
     const project = getProject(projectId);
     const workspacePath = project.workspace_path;
 
-    logger.info({ taskId, jobId, projectId }, 'Starting 3-gate completion workflow');
+    logger.info({ taskId, jobId, projectId, repairAttempt }, 'Starting 3-gate completion workflow');
 
     // Persist initial workflow review state
     dbRun(
@@ -78,27 +87,70 @@ export class WorkflowService {
         summary: verifRes.evidenceSummary
       });
 
+      // Bounded repair loop: check if autoRepair is active and under limit
+      if (autoRepair && taskId && repairAttempt < maxRepairAttempts) {
+        logger.info({ taskId, repairAttempt, maxRepairAttempts }, 'Attempting bounded repair for failed verification');
+        emitWebSocketEvent('workflow.repair.started', null, {
+          taskId,
+          reviewId,
+          repairAttempt: repairAttempt + 1,
+          maxRepairAttempts
+        });
+
+        const repairRes = await this.executeTaskRepair({
+          taskId,
+          projectId,
+          workspacePath,
+          failedReason: verifRes.evidenceSummary || 'Implementation verification failed',
+          attempt: repairAttempt + 1
+        });
+
+        if (repairRes.success) {
+          emitWebSocketEvent('workflow.repair.completed', null, {
+            taskId,
+            repairAttempt: repairAttempt + 1
+          });
+          return this.startCompletionWorkflow({
+            taskId,
+            jobId,
+            projectId,
+            prompt,
+            acceptanceCriteria,
+            baseline,
+            taskFiles,
+            autoRepair: true,
+            repairAttempt: repairAttempt + 1,
+            maxRepairAttempts
+          });
+        }
+      }
+
+      const blockReason = verifRes.evidenceSummary
+        ? `Verification failed: ${verifRes.evidenceSummary}${repairAttempt > 0 ? ` (repair attempts: ${repairAttempt}/${maxRepairAttempts})` : ''}`
+        : 'Implementation verification failed';
+
       // Update state to blocked
       dbRun(
         `UPDATE workflow_reviews SET acceptance_status = 'FAILED', workflow_status = 'blocked',
          report_json = ?, updated_at = datetime('now') WHERE id = ?`,
-        [JSON.stringify({ verification: verifRes }), reviewId]
+        [JSON.stringify({ verification: verifRes, repairAttempts: repairAttempt }), reviewId]
       );
 
-      if (taskId) dbRun("UPDATE tasks SET workflow_status = 'blocked' WHERE id = ?", [taskId]);
+      if (taskId) dbRun("UPDATE tasks SET status = 'blocked', workflow_status = 'blocked', error = ? WHERE id = ?", [blockReason, taskId]);
       if (jobId) dbRun("UPDATE jobs SET workflow_status = 'blocked' WHERE id = ?", [jobId]);
 
       emitWebSocketEvent('workflow.blocked', null, {
         reviewId,
         taskId,
         jobId,
-        reason: 'Implementation verification failed'
+        reason: blockReason
       });
 
       return {
         status: 'blocked',
         gate: 'verification',
-        verifRes
+        verifRes,
+        repairAttempts: repairAttempt
       };
     }
 
@@ -142,20 +194,21 @@ export class WorkflowService {
         status: auditRes.status
       });
 
+      const secReason = auditRes.reason || `Security audit ${auditRes.status}: blocking findings detected`;
       dbRun(
         `UPDATE workflow_reviews SET security_status = ?, workflow_status = 'blocked',
          report_json = ?, updated_at = datetime('now') WHERE id = ?`,
         [auditRes.status, JSON.stringify({ verification: verifRes, security: auditRes }), reviewId]
       );
 
-      if (taskId) dbRun("UPDATE tasks SET workflow_status = 'blocked' WHERE id = ?", [taskId]);
+      if (taskId) dbRun("UPDATE tasks SET status = 'blocked', workflow_status = 'blocked', error = ? WHERE id = ?", [secReason, taskId]);
       if (jobId) dbRun("UPDATE jobs SET workflow_status = 'blocked' WHERE id = ?", [jobId]);
 
       emitWebSocketEvent('workflow.blocked', null, {
         reviewId,
         taskId,
         jobId,
-        reason: `Security audit ${auditRes.status}: blocking findings detected`
+        reason: secReason
       });
 
       return {
@@ -189,20 +242,21 @@ export class WorkflowService {
     // Validate repository identity (including Ballo mismatch check)
     const repoCheck = GitOperations.validateRepositoryIdentity(projectId, workspacePath);
     if (!repoCheck.valid) {
+      const repoReason = repoCheck.error || 'Git repository mismatch';
       dbRun(
-        `UPDATE workflow_reviews SET git_status = 'BLOCKED', workflow_status = 'blocked',
+        `UPDATE workflow_reviews SET git_status = 'PUSH_FAILED', workflow_status = 'blocked',
          report_json = ?, updated_at = datetime('now') WHERE id = ?`,
-        [JSON.stringify({ verification: verifRes, security: auditRes, gitError: repoCheck.error }), reviewId]
+        [JSON.stringify({ verification: verifRes, security: auditRes, gitError: repoReason }), reviewId]
       );
 
-      if (taskId) dbRun("UPDATE tasks SET workflow_status = 'blocked' WHERE id = ?", [taskId]);
+      if (taskId) dbRun("UPDATE tasks SET status = 'blocked', workflow_status = 'blocked', error = ? WHERE id = ?", [repoReason, taskId]);
       if (jobId) dbRun("UPDATE jobs SET workflow_status = 'blocked' WHERE id = ?", [jobId]);
 
       emitWebSocketEvent('workflow.blocked', null, {
         reviewId,
         taskId,
         jobId,
-        reason: repoCheck.error
+        reason: repoReason
       });
 
       return {
@@ -215,34 +269,7 @@ export class WorkflowService {
     // Generate git review
     const gitReview = GitOperations.generateGitReview(projectId, workspacePath, baseline, effectiveTaskFiles);
 
-    // If no changes exist: provide clean no-push completion without manufacturing commit
-    if (gitReview.noChanges) {
-      dbRun(
-        `UPDATE workflow_reviews SET git_status = 'NO_CHANGES', workflow_status = 'completed',
-         report_json = ?, updated_at = datetime('now') WHERE id = ?`,
-        [JSON.stringify({ verification: verifRes, security: auditRes, git: gitReview }), reviewId]
-      );
-
-      if (taskId) dbRun("UPDATE tasks SET workflow_status = 'completed', status = 'completed' WHERE id = ?", [taskId]);
-      if (jobId) dbRun("UPDATE jobs SET workflow_status = 'completed', status = 'completed' WHERE id = ?", [jobId]);
-
-      emitWebSocketEvent('workflow.completed', null, {
-        reviewId,
-        taskId,
-        jobId,
-        projectId,
-        noChanges: true,
-        message: 'No files were modified. Workflow completed without manufacturing commit.'
-      });
-
-      return {
-        status: 'completed',
-        noChanges: true,
-        review: gitReview
-      };
-    }
-
-    // Create durable Git approval request in database
+    // Create durable Git approval request in database (including zero-change tasks)
     const approvalRequest = ApprovalService.createApprovalRequest({
       taskId,
       jobId,
@@ -253,11 +280,11 @@ export class WorkflowService {
       reviewedRevision: gitReview.reviewedRevision,
       auditId: auditRes.auditId,
       diffSummary: {
-        added: gitReview.filesAdded,
-        modified: gitReview.filesModified,
-        deleted: gitReview.filesDeleted
+        added: gitReview.filesAdded || 0,
+        modified: gitReview.filesModified || 0,
+        deleted: gitReview.filesDeleted || 0
       },
-      taskFiles: gitReview.taskFiles,
+      taskFiles: gitReview.taskFiles || [],
       proposedCommitMessage: gitReview.proposedCommitMessage
     });
 
@@ -278,6 +305,7 @@ export class WorkflowService {
       projectId,
       approvalId: approvalRequest.id,
       filesChanged: gitReview.taskFiles.length,
+      noChanges: gitReview.noChanges,
       repository: gitReview.repositoryIdentity,
       targetBranch: gitReview.targetBranch
     });
@@ -287,14 +315,18 @@ export class WorkflowService {
       taskId,
       jobId,
       projectId,
+      noChanges: gitReview.noChanges,
       targetBranch: gitReview.targetBranch,
       filesChangedCount: gitReview.taskFiles.length
     });
 
     return {
       status: 'awaiting_approval',
+      noChanges: gitReview.noChanges,
       approvalId: approvalRequest.id,
+      approvalRequest,
       reviewId,
+      review: gitReview,
       gitReview,
       auditRes,
       verifRes
@@ -315,5 +347,61 @@ export class WorkflowService {
         recovered: true
       });
     }
+  }
+
+  static async executeTaskRepair({ taskId, projectId, workspacePath, failedReason, attempt }) {
+    return new Promise((resolve) => {
+      const repairPrompt = `Fix implementation errors to satisfy verification criteria.\nFailure details:\n${failedReason}\nWorkspace: ${workspacePath}\nFix all failing tests and formatting issues.`;
+      const env = GitOperations.getWorkerEnv({ NINEROUTER_API_KEY });
+      const plan = ModelResolver.resolveExecutionPlan({
+        taskId,
+        projectId,
+        role: 'repair',
+        prompt: repairPrompt,
+        preferredEffort: attempt > 1 ? 'high' : 'medium'
+      });
+      const repairModel = plan.openCodeModel;
+      const args = ['run', '-m', repairModel, '--auto', '--format', 'json'];
+
+      if (attempt > 1) {
+        ModelFailover.recordFailoverEvent({
+          taskId,
+          projectId,
+          previousModel: DEFAULT_MODEL,
+          previousEffort: 'medium',
+          failureCategory: 'reasoning',
+          recoveryStrategy: plan.effort === 'high' ? 'increase_effort' : 'switch_model',
+          nextModel: plan.model,
+          nextEffort: plan.effort,
+          handoffArtifact: { failedReason, attempt, workspacePath }
+        });
+      }
+
+      try {
+        const child = spawn(OPENCODE_BIN, [...args, repairPrompt], {
+          cwd: workspacePath,
+          env,
+          shell: false,
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL');
+          resolve({ success: false, error: 'Repair timeout' });
+        }, 120000);
+
+        child.on('close', (code) => {
+          clearTimeout(timer);
+          resolve({ success: code === 0, code });
+        });
+
+        child.on('error', (err) => {
+          clearTimeout(timer);
+          resolve({ success: false, error: err.message });
+        });
+      } catch (err) {
+        resolve({ success: false, error: err.message });
+      }
+    });
   }
 }

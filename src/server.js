@@ -11,9 +11,11 @@ import tasks from './routes/tasks.js';
 import sessions from './routes/sessions.js';
 import jobs from './routes/jobs.js';
 import approvals from './routes/approvals.js';
+import dashboardRoutes from './routes/dashboard.js';
 import { setupWebSocket, shutdownWebSocket } from './realtime/websocket.js';
 import { registerJobRoutes } from './routes/job-routes.js';
 import { WorkflowService } from './services/workflow-service.js';
+import { ModelRouter } from './services/model-router.js';
 import logger from './logger.js';
 
 if (REQUIRE_AUTH && !API_AUTH_TOKEN) {
@@ -32,7 +34,11 @@ fastify.addHook('onRequest', (request, reply, done) => {
 });
 
 fastify.addHook('preHandler', async (request, reply) => {
-  if (REQUIRE_AUTH && API_AUTH_TOKEN && !request.url.startsWith('/health') && !request.url.startsWith('/ready')) {
+  if (REQUIRE_AUTH && API_AUTH_TOKEN &&
+      !request.url.startsWith('/health') &&
+      !request.url.startsWith('/ready') &&
+      !request.url.startsWith('/metrics') &&
+      !request.url.startsWith('/dashboard')) {
     const auth = request.headers.authorization;
     if (!auth || auth !== `Bearer ${API_AUTH_TOKEN}`) {
       reply.code(401);
@@ -61,12 +67,14 @@ fastify.register(tasks, { prefix: '/tasks' });
 fastify.register(sessions, { prefix: '/sessions' });
 fastify.register(jobs);
 fastify.register(approvals);
+fastify.register(dashboardRoutes);
 registerJobRoutes(fastify);
 
 const server = fastify.server;
 const wss = setupWebSocket(server);
 
 initDb();
+ModelRouter.initDefaultPolicies();
 recoverOperations();
 recoverSessions();
 recoverRunning();

@@ -12,6 +12,10 @@ import logger from '../logger.js';
 import { eventBus } from '../realtime/event-bus.js';
 import { GitOperations } from './git-operations.js';
 import { WorkflowService } from './workflow-service.js';
+import { ModelResolver } from './model-resolver.js';
+import { ModelFailover } from './model-failover.js';
+import { ModelRouter } from './model-router.js';
+import { ModelRegistry } from './model-registry.js';
 
 const emitter = new EventEmitter();
 const processes = new Map();
@@ -32,12 +36,12 @@ export const getDispatchQueue = () => dispatchQueue;
 export const getGlobalRunning = () => globalRunning;
 export const getCleanupTaskLogs = () => cleanupTaskLogs;
 
-const emitPersisted = (taskId, type, data) => {
+const emitPersisted = (taskId, type, data = {}) => {
   const seqRow = dbGetOne('SELECT COALESCE(MAX(sequence),0) AS m FROM task_events WHERE task_id=?', [taskId]);
   const seq = (seqRow || { m: 0 }).m + 1;
   // limit payload size to prevent huge rows
-  const payload = JSON.stringify(data);
-  if (payload.length > 64000) {
+  const payload = JSON.stringify(data ?? {});
+  if (payload && payload.length > 64000) {
     data = { ...data, _truncated: true, payloadSnippet: payload.substring(0, 1000) };
   }
   dbRun('INSERT INTO task_events (task_id, sequence, type, payload_json) VALUES (?,?,?,?)',
@@ -74,7 +78,7 @@ const schedule = () => {
     for (const id of dispatchQueue) {
       const task = dbGetOne('SELECT * FROM tasks WHERE id=?', [id]);
       if (!task || task.status !== 'queued') continue;
-      const runningForProject = (dbGet('SELECT COUNT(*) AS cnt FROM tasks WHERE project_id=? AND status=?', [task.project_id, 'running'])[0] || { cnt: 0 }).cnt;
+      const runningForProject = (dbGet('SELECT COUNT(*) AS cnt FROM tasks WHERE project_id=? AND execution_status=?', [task.project_id, 'running'])[0] || { cnt: 0 }).cnt;
       if (runningForProject >= MAX_PROJECT_TASKS) continue;
       chosen = task; break;
     }
@@ -85,8 +89,16 @@ const schedule = () => {
 };
 
 const runTask = (task) => {
-  const env = { ...process.env, NINEROUTER_API_KEY: API_KEY };
-  const targetModel = task.model || DEFAULT_MODEL;
+  const env = GitOperations.getWorkerEnv({ NINEROUTER_API_KEY: API_KEY });
+  const plan = ModelResolver.resolveExecutionPlan({
+    taskId: task.id,
+    projectId: task.project_id,
+    sessionId: task.session_id,
+    role: 'worker',
+    prompt: task.prompt,
+    preferredModel: task.model
+  });
+  const targetModel = plan.openCodeModel;
   const args = ['run', '-m', targetModel, '--auto', '--format', 'json'];
   
   // If task has an associated session that has an opencode_session_id, pass -s
@@ -101,7 +113,7 @@ const runTask = (task) => {
   if (!useStdin && task.prompt) {
     args.push(task.prompt);
   }
-  logger.info({ taskId: task.id, hasKey: !!API_KEY, args }, 'Spawning OpenCode task');
+  logger.info({ taskId: task.id, hasKey: !!API_KEY, targetModel, args }, 'Spawning OpenCode task');
   
   const workspace = join(WORKSPACE_ROOT, dbGetOne('SELECT slug FROM projects WHERE id=?', [task.project_id]).slug);
   mkdirSync(workspace, { recursive: true });
@@ -122,9 +134,16 @@ const runTask = (task) => {
   processes.set(task.id, child);
   globalRunning++;
   const taskLogger = new TaskLogger(task.id);
-  dbRun("UPDATE tasks SET status='running', execution_status='running', workflow_status='running', pid=?, started_at=datetime('now'), updated_at=datetime('now') WHERE id=?", [child.pid, task.id]);
-  emitPersisted(task.id, 'task.started', { pid: child.pid, args });
-  emitPersisted(task.id, 'task.progress', { state: 'spawned' });
+  dbRun("UPDATE tasks SET status='running', execution_status='running', workflow_status='running', model=?, pid=?, started_at=datetime('now'), updated_at=datetime('now') WHERE id=?", [targetModel, child.pid, task.id]);
+  emitPersisted(task.id, 'task.routing', {
+    model: plan.model,
+    effort: plan.effort,
+    openCodeModel: plan.openCodeModel,
+    selectionSource: plan.selectionSource,
+    reason: plan.reason
+  });
+  emitPersisted(task.id, 'task.started', { pid: child.pid, args, model: targetModel });
+  emitPersisted(task.id, 'task.progress', { state: 'spawned', model: targetModel });
 
   let capturedSession = false;
 
@@ -193,10 +212,38 @@ const finish = (task, status, error, pid, code) => {
 
   const isCompleted = status === 'completed';
   const workflowStatus = isCompleted ? (taskObj?.project_id ? 'verifying' : 'completed') : 'failed';
+  const taskStatus = (isCompleted && taskObj?.project_id) ? 'running' : status;
+
+  const effectiveModel = taskObj?.model || DEFAULT_MODEL;
+  const failureClassification = !isCompleted
+    ? ModelFailover.classifyFailure({ exitCode: code, error })
+    : { category: 'none', recoverable: false, reason: null };
+
+  try {
+    ModelRouter.recordExecutionAttempt({
+      taskId: id,
+      projectId: taskObj?.project_id,
+      sessionId: taskObj?.session_id,
+      agentRole: 'worker',
+      modelId: effectiveModel,
+      openCodeModel: effectiveModel,
+      failureCategory: failureClassification.category,
+      verificationOutcome: isCompleted ? 'success' : 'failed',
+      errorMessage: error
+    });
+
+    if (isCompleted) {
+      ModelRegistry.recordExecutionSuccess(effectiveModel);
+      ModelRouter.recordOutcome({ modelId: effectiveModel, verified: true });
+    } else {
+      ModelRegistry.recordExecutionFailure(effectiveModel, failureClassification.category);
+      ModelRouter.recordOutcome({ modelId: effectiveModel, verified: false });
+    }
+  } catch {}
 
   dbRun("UPDATE tasks SET status=?, execution_status=?, workflow_status=?, error=?, exit_code=?, finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?",
-    [status, status, workflowStatus, error, code, id]);
-  emitPersisted(id, isCompleted ? 'task.completed' : 'task.failed', { exitCode: code, error });
+    [taskStatus, status, workflowStatus, error, code, id]);
+  emitPersisted(id, isCompleted ? (taskObj?.project_id ? 'task.execution_finished' : 'task.completed') : 'task.failed', { exitCode: code, error });
 
   if (isCompleted && taskObj?.project_id) {
     WorkflowService.startCompletionWorkflow({
@@ -257,14 +304,33 @@ export const shutdownAll = () => {
 };
 
 export const recoverRunning = () => {
-  const rows = dbGet("SELECT t.*, p.slug FROM tasks t JOIN projects p ON t.project_id=p.id WHERE t.status='running'");
+  const rows = dbGet("SELECT t.*, p.slug FROM tasks t LEFT JOIN projects p ON t.project_id=p.id WHERE t.execution_status='running'");
   for (const row of rows) {
-    dbRun("UPDATE tasks SET status='interrupted', error='server restarted', finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?", [row.id]);
+    if (row.pid && typeof row.pid === 'number') {
+      try {
+        process.kill(row.pid, 0);
+        process.kill(row.pid, 'SIGTERM');
+        const killTimer = setTimeout(() => {
+          try { process.kill(row.pid, 'SIGKILL'); } catch {}
+        }, 1000);
+        if (killTimer?.unref) killTimer.unref();
+      } catch {}
+    }
+    dbRun("UPDATE tasks SET status='interrupted', execution_status='interrupted', workflow_status='interrupted', error='server restarted', finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?", [row.id]);
     emitPersisted(row.id, 'task.interrupted', { reason: 'server restarted' });
   }
 };
 
-export const startFromQueue = () => { schedule(); };
+export const startFromQueue = () => {
+  if (dispatchBlocked) return;
+  const queued = dbGet("SELECT id FROM tasks WHERE status='queued' ORDER BY created_at ASC");
+  for (const row of queued) {
+    if (!dispatchQueue.includes(row.id)) {
+      dispatchQueue.push(row.id);
+    }
+  }
+  schedule();
+};
 
 export const getDiskStats = () => {
   try {

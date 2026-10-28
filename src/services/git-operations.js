@@ -4,9 +4,85 @@ import { join } from 'node:path';
 import { validateGitHubUrl, getProject } from './project-service.js';
 import logger from '../logger.js';
 
+export const GIT_STATES = {
+  LOCAL_NO_GIT: 'LOCAL_NO_GIT',
+  LOCAL_GIT_NO_REMOTE: 'LOCAL_GIT_NO_REMOTE',
+  GIT_REMOTE_CONFIGURED: 'GIT_REMOTE_CONFIGURED'
+};
+
 const FORBIDDEN_FILE_REGEX = /(^|\/)(\.env|\.env\.[^.]*|.*\.db|.*\.db-(?:wal|shm)|.*\.sqlite[0-9]?|.*\.log|.*\.log\.gz|.*\.sql|.*\.dump|.*\.bak|id_rsa|id_ed25519|.*\.pem|.*\.key)$/i;
 
 export class GitOperations {
+  static getGitState(workspacePath) {
+    if (!workspacePath || !existsSync(workspacePath) || !this.isGitRepo(workspacePath)) {
+      return GIT_STATES.LOCAL_NO_GIT;
+    }
+    const remote = this.getRemoteUrl(workspacePath, 'origin');
+    if (!remote) {
+      return GIT_STATES.LOCAL_GIT_NO_REMOTE;
+    }
+    return GIT_STATES.GIT_REMOTE_CONFIGURED;
+  }
+
+  static initLocalGit(workspacePath, defaultBranch = 'main') {
+    if (!existsSync(workspacePath)) {
+      throw new Error(`Workspace directory does not exist: ${workspacePath}`);
+    }
+    if (!this.isGitRepo(workspacePath)) {
+      execSync(`git init -b "${defaultBranch}" --quiet`, { cwd: workspacePath, stdio: 'pipe' });
+      try {
+        execSync('git config user.name "CodeOrchestrator"', { cwd: workspacePath, stdio: 'pipe' });
+        execSync('git config user.email "orchestrator@local"', { cwd: workspacePath, stdio: 'pipe' });
+      } catch {}
+      return true;
+    }
+    return false;
+  }
+
+  static configureRemote(workspacePath, remoteUrl, remoteName = 'origin') {
+    if (!existsSync(workspacePath)) {
+      throw new Error(`Workspace directory does not exist: ${workspacePath}`);
+    }
+    if (!this.isGitRepo(workspacePath)) {
+      this.initLocalGit(workspacePath);
+    }
+    const existing = this.getRemoteUrl(workspacePath, remoteName);
+    if (existing) {
+      execSync(`git remote set-url ${remoteName} "${remoteUrl}"`, { cwd: workspacePath, stdio: 'pipe' });
+    } else {
+      execSync(`git remote add ${remoteName} "${remoteUrl}"`, { cwd: workspacePath, stdio: 'pipe' });
+    }
+    return this.getRemoteUrl(workspacePath, remoteName);
+  }
+
+  static getWorkerEnv(overrides = {}) {
+    // ponytail: strip all publish/admin credentials & inject git sandbox interceptor into PATH.
+    const sandboxDir = join(process.cwd(), 'bin', 'git-sandbox');
+    const existingPath = process.env.PATH || '';
+    const env = {
+      ...process.env,
+      ...overrides,
+      PATH: `${sandboxDir}:${existingPath}`,
+      GIT_TERMINAL_PROMPT: '0',
+      GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o IdentitiesOnly=yes -F /dev/null'
+    };
+    // Strip push-capable credentials & admin secrets
+    delete env.SSH_AUTH_SOCK;
+    delete env.GIT_SSH;
+    delete env.GIT_ASKPASS;
+    delete env.GITHUB_TOKEN;
+    delete env.GH_TOKEN;
+    delete env.DISCORD_BOT_TOKEN;
+    delete env.DISCORD_CLIENT_ID;
+    delete env.ORCHESTRATOR_API_TOKEN;
+    delete env.API_AUTH_TOKEN;
+    delete env.DATABASE_PATH;
+    delete env.DISCORD_DB_PATH;
+    delete env.AWS_SECRET_ACCESS_KEY;
+    delete env.AWS_ACCESS_KEY_ID;
+    return env;
+  }
+
   static isGitRepo(workspacePath) {
     try {
       execSync('git rev-parse --is-inside-work-tree', { cwd: workspacePath, stdio: 'pipe' });
@@ -94,25 +170,53 @@ export class GitOperations {
 
   static validateRepositoryIdentity(projectId, workspacePath) {
     const project = getProject(projectId);
-    if (!this.isGitRepo(workspacePath)) {
-      return { valid: false, error: 'Project workspace is not a valid Git repository' };
+    const gitState = this.getGitState(workspacePath);
+    const expectedRepo = project.repository_url || project.repo_url || project.metadata?.expectedRepoUrl;
+
+    if (gitState === GIT_STATES.LOCAL_NO_GIT) {
+      if (expectedRepo) {
+        return { valid: false, error: 'Project workspace is not a valid Git repository', gitState };
+      }
+      return {
+        valid: true,
+        gitState,
+        isGit: false,
+        actualRoot: workspacePath,
+        remoteUrl: null,
+        currentBranch: project.default_branch || 'main',
+        expectedBranch: project.default_branch || 'main'
+      };
     }
 
     const actualRoot = execSync('git rev-parse --show-toplevel', { cwd: workspacePath, stdio: 'pipe' }).toString().trim();
     if (actualRoot !== workspacePath) {
-      return { valid: false, error: `Git root mismatch: expected ${workspacePath}, found ${actualRoot}` };
+      return { valid: false, error: `Git root mismatch: expected ${workspacePath}, found ${actualRoot}`, gitState };
     }
 
     const actualRemote = this.getRemoteUrl(workspacePath, 'origin');
-    const expectedRepo = project.repository_url || project.repo_url || project.metadata?.expectedRepoUrl;
 
     // Check Ballo vs CodeOrchestrator mismatch constraint explicitly
     const isBallo = (project.slug && project.slug.toLowerCase().includes('ballo')) ||
                     (project.name && project.name.toLowerCase().includes('ballo'));
-    if (isBallo && actualRemote && actualRemote.toLowerCase().includes('codeorchestrator')) {
+    if (isBallo && actualRemote && (actualRemote.toLowerCase().includes('codeorchestrator') || actualRemote.toLowerCase().includes('coding-orchestrator'))) {
       return {
         valid: false,
-        error: `Critical repository mismatch: Project '${project.name}' points to codeorchestrator repository (${actualRemote}) instead of ballo repository.`
+        error: `Critical repository mismatch: Project '${project.name}' points to codeorchestrator repository (${actualRemote}) instead of ballo repository.`,
+        gitState
+      };
+    }
+
+    if (gitState === GIT_STATES.LOCAL_GIT_NO_REMOTE) {
+      if (expectedRepo) {
+        return { valid: false, error: `Repository remote 'origin' is not configured, but expected ${expectedRepo}.`, gitState };
+      }
+      return {
+        valid: true,
+        gitState,
+        actualRoot,
+        remoteUrl: null,
+        currentBranch: this.getCurrentBranch(workspacePath),
+        expectedBranch: project.default_branch || 'main'
       };
     }
 
@@ -126,7 +230,8 @@ export class GitOperations {
         if (actualIdentity !== expectedIdentity) {
           return {
             valid: false,
-            error: `Repository identity mismatch: workspace is configured for ${actualIdentity}, but project metadata expects ${expectedIdentity}.`
+            error: `Repository identity mismatch: workspace is configured for ${actualIdentity}, but project metadata expects ${expectedIdentity}.`,
+            gitState
           };
         }
       }
@@ -140,6 +245,7 @@ export class GitOperations {
 
     return {
       valid: true,
+      gitState,
       actualRoot,
       remoteUrl: actualRemote,
       currentBranch,

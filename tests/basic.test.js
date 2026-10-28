@@ -90,6 +90,17 @@ test('Task reaches terminal state', async () => {
     const r = await fetch(`/tasks/${global.taskId}`);
     const j = JSON.parse(r.body);
     if (j.status === 'completed' || j.status === 'failed') { assert.ok(true); return; }
+    if (j.workflow_status === 'awaiting_approval') {
+      const pendingRes = await fetch('/approvals/pending');
+      const pending = JSON.parse(pendingRes.body);
+      const app = (pending || []).find(a => a.task_id === global.taskId);
+      if (app) {
+        await fetch(`/approvals/${app.id}/decide`, {
+          method: 'POST',
+          body: JSON.stringify({ decision: 'keep_local', userId: 'tester' })
+        });
+      }
+    }
   }
   throw new Error('task not terminal');
 });

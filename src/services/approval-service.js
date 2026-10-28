@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { dbGetOne, dbRun, dbGet } from '../database/db.js';
 import { getProject } from './project-service.js';
 import { GitOperations } from './git-operations.js';
+import { GitPublisher } from './git-publisher.js';
 import { emitWebSocketEvent } from '../realtime/event-bus.js';
 import logger from '../logger.js';
 
@@ -20,6 +21,7 @@ export class ApprovalService {
     proposedCommitMessage = null
   }) {
     const id = randomUUID();
+    const effectiveReviewed = reviewedRevision || baseRevision || 'HEAD';
     dbRun(
       `INSERT INTO git_approval_requests (
         id, task_id, job_id, project_id, repository_identity, target_branch,
@@ -34,7 +36,7 @@ export class ApprovalService {
         repositoryIdentity,
         targetBranch,
         baseRevision,
-        reviewedRevision,
+        effectiveReviewed,
         auditId,
         JSON.stringify(diffSummary || {}),
         JSON.stringify(taskFiles || []),
@@ -106,9 +108,9 @@ export class ApprovalService {
     return false;
   }
 
-  static async processDecision({ approvalRequestId, userId, decision, memberRoles = [] }) {
-    if (!['push', 'keep_local', 'reject'].includes(decision)) {
-      throw new Error(`Invalid decision: ${decision}. Must be 'push', 'keep_local', or 'reject'.`);
+  static async processDecision({ approvalRequestId, userId, decision, memberRoles = [], prOptions = {} }) {
+    if (!['push', 'create_pr', 'keep_local', 'reject'].includes(decision)) {
+      throw new Error(`Invalid decision: ${decision}. Must be 'push', 'create_pr', 'keep_local', or 'reject'.`);
     }
 
     const approval = this.getApprovalRequest(approvalRequestId);
@@ -258,7 +260,7 @@ export class ApprovalService {
 
         // Do NOT mark task COMPLETED!
         if (approval.task_id) {
-          dbRun("UPDATE tasks SET workflow_status = 'failed' WHERE id = ?", [approval.task_id]);
+          dbRun("UPDATE tasks SET status = 'failed', workflow_status = 'failed' WHERE id = ?", [approval.task_id]);
         }
         if (approval.job_id) {
           dbRun("UPDATE jobs SET workflow_status = 'failed' WHERE id = ?", [approval.job_id]);
@@ -309,14 +311,124 @@ export class ApprovalService {
         branch
       };
     }
+
+    // Handle Create Pull Request
+    if (decision === 'create_pr') {
+      emitWebSocketEvent('git.pr.started', null, { approvalId: approval.id, taskId: approval.task_id, jobId: approval.job_id });
+
+      const opId = randomUUID();
+      const remote = 'origin';
+      const branch = approval.target_branch || 'main';
+
+      dbRun(
+        `INSERT INTO git_operations (id, task_id, job_id, project_id, approval_request_id, operation, remote, branch, status, created_at)
+         VALUES (?, ?, ?, ?, ?, 'create_pr', ?, ?, 'running', datetime('now'))`,
+        [opId, approval.task_id, approval.job_id, project.id, approval.id, remote, branch]
+      );
+
+      const prRes = GitPublisher.publishPullRequest({
+        approval,
+        baseBranch: prOptions.baseBranch || branch,
+        featureBranch: prOptions.featureBranch || null,
+        title: prOptions.title || approval.proposed_commit_message || null,
+        body: prOptions.body || null
+      });
+
+      if (!prRes.success) {
+        dbRun(
+          `UPDATE git_operations SET status = 'failed', error_code = 'PR_FAILED', error_message = ?, completed_at = datetime('now') WHERE id = ?`,
+          [prRes.error, opId]
+        );
+        emitWebSocketEvent('git.pr.failed', null, {
+          approvalId: approval.id,
+          taskId: approval.task_id,
+          jobId: approval.job_id,
+          error: prRes.error
+        });
+
+        if (approval.task_id) {
+          dbRun("UPDATE tasks SET status = 'failed', workflow_status = 'failed' WHERE id = ?", [approval.task_id]);
+        }
+        if (approval.job_id) {
+          dbRun("UPDATE jobs SET workflow_status = 'failed' WHERE id = ?", [approval.job_id]);
+        }
+        dbRun("UPDATE workflow_reviews SET git_status = 'PR_FAILED', workflow_status = 'failed' WHERE (task_id = ? OR job_id = ?)",
+          [approval.task_id, approval.job_id]);
+
+        return {
+          success: false,
+          prFailed: true,
+          reason: prRes.error
+        };
+      }
+
+      dbRun(
+        `UPDATE git_operations SET status = 'success', commit_sha = ?, pr_url = ?, pr_number = ?, completed_at = datetime('now') WHERE id = ?`,
+        [prRes.commitSha, prRes.prUrl, prRes.prNumber, opId]
+      );
+      dbRun("UPDATE git_approval_requests SET status = 'approved_pr', pr_url = ?, pr_number = ? WHERE id = ?", [prRes.prUrl, prRes.prNumber, approval.id]);
+
+      this.markWorkflowCompleted(approval, 'PR_CREATED', prRes.commitSha);
+
+      emitWebSocketEvent('git.pr.created', null, {
+        approvalId: approval.id,
+        taskId: approval.task_id,
+        jobId: approval.job_id,
+        commitSha: prRes.commitSha,
+        prUrl: prRes.prUrl,
+        prNumber: prRes.prNumber,
+        branchName: prRes.branchName
+      });
+
+      emitWebSocketEvent('workflow.completed', null, {
+        approvalId: approval.id,
+        taskId: approval.task_id,
+        jobId: approval.job_id,
+        projectId: project.id,
+        decision: 'create_pr',
+        commitSha: prRes.commitSha,
+        prUrl: prRes.prUrl,
+        prNumber: prRes.prNumber
+      });
+
+      return {
+        success: true,
+        decision: 'create_pr',
+        commitSha: prRes.commitSha,
+        prUrl: prRes.prUrl,
+        prNumber: prRes.prNumber,
+        branchName: prRes.branchName
+      };
+    }
+  }
+
+  static updateDiscordMessage(approvalId, { messageId, channelId = null }) {
+    dbRun(
+      "UPDATE git_approval_requests SET discord_message_id = ?, discord_channel_id = COALESCE(?, discord_channel_id) WHERE id = ?",
+      [messageId, channelId, approvalId]
+    );
+    return this.getApprovalRequest(approvalId);
+  }
+
+  static getApprovalRequestByDiscordMessage(messageId) {
+    const row = dbGetOne(
+      'SELECT * FROM git_approval_requests WHERE discord_message_id = ? ORDER BY created_at DESC LIMIT 1',
+      [messageId]
+    );
+    if (!row) return null;
+    try { row.diff_summary = JSON.parse(row.diff_summary_json || '{}'); } catch { row.diff_summary = {}; }
+    try { row.files_changed = JSON.parse(row.files_changed_json || '[]'); } catch { row.files_changed = []; }
+    return row;
   }
 
   static markWorkflowCompleted(approval, gitStatus, commitSha) {
     if (approval.task_id) {
       dbRun("UPDATE tasks SET workflow_status = 'completed', status = 'completed', updated_at = datetime('now') WHERE id = ?", [approval.task_id]);
+      emitWebSocketEvent('task.completed', null, { taskId: approval.task_id, gitStatus, commitSha });
     }
     if (approval.job_id) {
       dbRun("UPDATE jobs SET workflow_status = 'completed', status = 'completed', updated_at = datetime('now') WHERE id = ?", [approval.job_id]);
+      emitWebSocketEvent('job.completed', null, { jobId: approval.job_id, gitStatus, commitSha });
     }
     dbRun(
       `UPDATE workflow_reviews SET git_status = ?, workflow_status = 'completed', updated_at = datetime('now')

@@ -27,12 +27,21 @@ export class PersistenceStore {
         status TEXT NOT NULL,
         last_event_sequence INTEGER DEFAULT 0,
         last_event_id TEXT,
+        terminal_notified INTEGER DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         completed_at TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_discord_executions_status ON discord_executions(status);
       CREATE INDEX IF NOT EXISTS idx_discord_executions_channel ON discord_executions(channel_id);
+
+      CREATE TABLE IF NOT EXISTS discord_processed_events (
+        event_key TEXT PRIMARY KEY,
+        event_type TEXT,
+        execution_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_processed_events_exec ON discord_processed_events(execution_id);
 
       CREATE TABLE IF NOT EXISTS discord_conversations (
         id TEXT PRIMARY KEY,
@@ -117,14 +126,33 @@ export class PersistenceStore {
         UNIQUE(multipart_prompt_id, chunk_index)
       );
       CREATE INDEX IF NOT EXISTS idx_discord_mp_chunk_prompt ON discord_multipart_chunks(multipart_prompt_id);
+
+      CREATE TABLE IF NOT EXISTS discord_approval_messages (
+        id TEXT PRIMARY KEY,
+        approval_id TEXT NOT NULL,
+        task_id TEXT,
+        job_id TEXT,
+        guild_id TEXT,
+        channel_id TEXT NOT NULL,
+        message_id TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_approval_msgs_approval ON discord_approval_messages(approval_id);
+      CREATE INDEX IF NOT EXISTS idx_approval_msgs_task ON discord_approval_messages(task_id);
+      CREATE INDEX IF NOT EXISTS idx_approval_msgs_job ON discord_approval_messages(job_id);
+      CREATE INDEX IF NOT EXISTS idx_approval_msgs_message ON discord_approval_messages(message_id);
     `);
+
+    try {
+      this.db.exec("ALTER TABLE discord_executions ADD COLUMN terminal_notified INTEGER DEFAULT 0");
+    } catch {}
   }
 
   saveExecution(item) {
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO discord_executions
-      (id, kind, guild_id, channel_id, user_id, message_id, project_id, project_slug, prompt_snippet, status, last_event_sequence, last_event_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      (id, kind, guild_id, channel_id, user_id, message_id, project_id, project_slug, prompt_snippet, status, last_event_sequence, last_event_id, terminal_notified, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     `);
     stmt.run(
       item.id,
@@ -138,7 +166,8 @@ export class PersistenceStore {
       item.promptSnippet || null,
       item.status || 'queued',
       item.lastEventSequence || 0,
-      item.lastEventId || null
+      item.lastEventId || null,
+      item.terminalNotified ? 1 : 0
     );
     return this.getExecution(item.id);
   }
@@ -156,7 +185,13 @@ export class PersistenceStore {
       vals.push(updates.status);
       if (['completed', 'failed', 'cancelled', 'partially_completed', 'interrupted'].includes(updates.status)) {
         sets.push("completed_at = COALESCE(completed_at, datetime('now'))");
+      } else {
+        sets.push('terminal_notified = 0');
       }
+    }
+    if (updates.terminalNotified !== undefined) {
+      sets.push('terminal_notified = ?');
+      vals.push(updates.terminalNotified ? 1 : 0);
     }
     if (updates.messageId !== undefined) {
       sets.push('message_id = ?');
@@ -177,6 +212,26 @@ export class PersistenceStore {
     const sql = `UPDATE discord_executions SET ${sets.join(', ')} WHERE id = ?`;
     this.db.prepare(sql).run(...vals);
     return this.getExecution(id);
+  }
+
+  markTerminalNotified(id) {
+    const info = this.db.prepare(
+      "UPDATE discord_executions SET terminal_notified = 1, updated_at = datetime('now') WHERE id = ? AND terminal_notified = 0"
+    ).run(id);
+    return info.changes > 0;
+  }
+
+  isEventProcessed(eventKey) {
+    const row = this.db.prepare('SELECT 1 FROM discord_processed_events WHERE event_key = ?').get(eventKey);
+    return Boolean(row);
+  }
+
+  recordProcessedEvent(eventKey, eventType = null, executionId = null) {
+    try {
+      this.db.prepare(
+        'INSERT OR IGNORE INTO discord_processed_events (event_key, event_type, execution_id, created_at) VALUES (?, ?, ?, datetime(\'now\'))'
+      ).run(eventKey, eventType, executionId);
+    } catch {}
   }
 
   getActiveExecutions() {
@@ -214,19 +269,41 @@ export class PersistenceStore {
     return this.getConversation(item.id);
   }
 
-  getActiveConversation({ guildId, channelId, threadId = null, discordUserId }) {
+  getActiveConversation({ guildId, channelId, threadId = null, discordUserId, projectId = undefined }) {
+    let projectClause = '';
+    const params = [guildId];
+
     if (threadId) {
+      params.push(threadId, discordUserId);
+      if (projectId !== undefined) {
+        if (projectId === null) {
+          projectClause = ' AND (project_id IS NULL OR project_id = "")';
+        } else {
+          projectClause = ' AND project_id = ?';
+          params.push(projectId);
+        }
+      }
       return this.db.prepare(`
         SELECT * FROM discord_conversations
-        WHERE guild_id = ? AND thread_id = ? AND discord_user_id = ? AND status = 'active'
+        WHERE guild_id = ? AND thread_id = ? AND discord_user_id = ? AND status = 'active'${projectClause}
         ORDER BY last_activity_at DESC, updated_at DESC LIMIT 1
-      `).get(guildId, threadId, discordUserId);
+      `).get(...params);
+    }
+
+    params.push(channelId, discordUserId);
+    if (projectId !== undefined) {
+      if (projectId === null) {
+        projectClause = ' AND (project_id IS NULL OR project_id = "")';
+      } else {
+        projectClause = ' AND project_id = ?';
+        params.push(projectId);
+      }
     }
     return this.db.prepare(`
       SELECT * FROM discord_conversations
-      WHERE guild_id = ? AND channel_id = ? AND (thread_id IS NULL OR thread_id = '') AND discord_user_id = ? AND status = 'active'
+      WHERE guild_id = ? AND channel_id = ? AND (thread_id IS NULL OR thread_id = '') AND discord_user_id = ? AND status = 'active'${projectClause}
       ORDER BY last_activity_at DESC, updated_at DESC LIMIT 1
-    `).get(guildId, channelId, discordUserId);
+    `).get(...params);
   }
 
   getConversation(id) {
@@ -410,6 +487,18 @@ export class PersistenceStore {
     return this.getSubmission(id);
   }
 
+  claimSubmissionForExecution(id) {
+    const info = this.db.prepare(
+      `UPDATE discord_submissions
+       SET status = 'executing', updated_at = datetime('now')
+       WHERE id = ? AND (
+         status IN ('received', 'confirmed')
+         OR (status = 'executing' AND execution_id IS NULL AND updated_at < datetime('now', '-30 seconds'))
+       )`
+    ).run(id);
+    return info.changes > 0;
+  }
+
   // Multipart Prompt tracking methods
   startMultipartPrompt({ id, guildId, channelId, userId, projectId = null }) {
     // Cancel any existing collecting prompts for this user in this channel
@@ -474,6 +563,37 @@ export class PersistenceStore {
       "UPDATE discord_multipart_prompts SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?"
     ).run(id);
     return this.getMultipartPrompt(id);
+  }
+
+  // Approval Message tracking methods
+  saveApprovalMessage(item) {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO discord_approval_messages
+      (id, approval_id, task_id, job_id, guild_id, channel_id, message_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `);
+    stmt.run(
+      item.id,
+      item.approvalId,
+      item.taskId || null,
+      item.jobId || null,
+      item.guildId || null,
+      item.channelId,
+      item.messageId
+    );
+    return this.getApprovalMessage(item.messageId);
+  }
+
+  getApprovalMessage(messageId) {
+    return this.db.prepare('SELECT * FROM discord_approval_messages WHERE message_id = ?').get(messageId);
+  }
+
+  getApprovalMessageByApprovalId(approvalId) {
+    return this.db.prepare('SELECT * FROM discord_approval_messages WHERE approval_id = ? ORDER BY created_at DESC LIMIT 1').get(approvalId);
+  }
+
+  getApprovalMessageByTaskOrJob(id) {
+    return this.db.prepare('SELECT * FROM discord_approval_messages WHERE task_id = ? OR job_id = ? ORDER BY created_at DESC LIMIT 1').get(id, id);
   }
 
   close() {

@@ -101,6 +101,25 @@ export default async function projects(app) {
     }
   });
 
+  app.post('/:id/git/remote', async (req, reply) => {
+    try {
+      const { repoUrl, defaultBranch, initIfMissing } = req.body || {};
+      const result = ps.configureProjectGitRemote(req.params.id, { repoUrl, defaultBranch, initIfMissing });
+      reply.send(result);
+    } catch (e) {
+      reply.code(400).send({ error: e.message });
+    }
+  });
+
+  app.get('/:id/git/state', async (req, reply) => {
+    try {
+      const gitState = ps.getProjectGitState(req.params.id);
+      reply.send({ projectId: req.params.id, gitState });
+    } catch (e) {
+      reply.code(404).send({ error: e.message });
+    }
+  });
+
   app.get('/:id/validate', async (req, reply) => {
     try {
       const project = ps.getProject(req.params.id);

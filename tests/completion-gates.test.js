@@ -326,12 +326,189 @@ test('WorkflowService: 0 changed files completes cleanly without pushing or manu
     taskFiles: []
   });
 
-  assert.equal(wfRes.status, 'completed');
+  assert.equal(wfRes.status, 'awaiting_approval');
   assert.equal(wfRes.noChanges, true);
+  assert.ok(wfRes.approvalId);
+
+  // Decide keep_local to finalize without pushing or manufacturing commits
+  const decRes = await ApprovalService.processDecision({
+    approvalRequestId: wfRes.approvalId,
+    userId: 'user-nochanges-test',
+    decision: 'keep_local'
+  });
+  assert.equal(decRes.success, true);
+  assert.equal(decRes.localPreserved, true);
 });
 
 test('WorkflowService: Crash recovery logs and handles pending workflows on restart', () => {
   assert.doesNotThrow(() => {
     WorkflowService.recoverPendingWorkflows();
   });
+});
+
+test('GitOperations: 3 valid project git states without blocking local operations', () => {
+  const noGitDir = mkdtempSync(join(tmpdir(), 'nogit-test-'));
+  tempDirs.push(noGitDir);
+
+  // 1. LOCAL_NO_GIT
+  assert.equal(GitOperations.getGitState(noGitDir), 'LOCAL_NO_GIT');
+  const projNoGitId = 'proj-nogit-' + Date.now();
+  dbRun(
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
+     VALUES (?, 'No Git Proj', ?, ?, 'main', '{}')`,
+    [projNoGitId, 'nogit-' + Date.now(), noGitDir]
+  );
+  const idNoGit = GitOperations.validateRepositoryIdentity(projNoGitId, noGitDir);
+  assert.equal(idNoGit.valid, true);
+  assert.equal(idNoGit.gitState, 'LOCAL_NO_GIT');
+
+  // 2. LOCAL_GIT_NO_REMOTE
+  GitOperations.initLocalGit(noGitDir, 'main');
+  assert.equal(GitOperations.getGitState(noGitDir), 'LOCAL_GIT_NO_REMOTE');
+  const idLocalGit = GitOperations.validateRepositoryIdentity(projNoGitId, noGitDir);
+  assert.equal(idLocalGit.valid, true);
+  assert.equal(idLocalGit.gitState, 'LOCAL_GIT_NO_REMOTE');
+
+  // 3. GIT_REMOTE_CONFIGURED
+  GitOperations.configureRemote(noGitDir, 'git@github.com:example/repo.git');
+  assert.equal(GitOperations.getGitState(noGitDir), 'GIT_REMOTE_CONFIGURED');
+  assert.equal(GitOperations.getRemoteUrl(noGitDir), 'git@github.com:example/repo.git');
+});
+
+test('GitOperations & ProjectService: Identity separation never infers Go module renames from git remote', async () => {
+  const { configureProjectGitRemote, getProject } = await import('../src/services/project-service.js');
+  const goDir = mkdtempSync(join(tmpdir(), 'gomod-test-'));
+  tempDirs.push(goDir);
+
+  writeFileSync(join(goDir, 'go.mod'), 'module github.com/original-owner/my-go-module\n\ngo 1.23.0\n');
+  const projGoId = 'proj-go-' + Date.now();
+  dbRun(
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
+     VALUES (?, 'Go Module Proj', ?, ?, 'main', '{}')`,
+    [projGoId, 'gomod-' + Date.now(), goDir]
+  );
+
+  configureProjectGitRemote(projGoId, {
+    repoUrl: 'git@github.com:different-owner/renamed-remote.git',
+    defaultBranch: 'main'
+  });
+
+  const { readFileSync } = await import('node:fs');
+  const goModContent = readFileSync(join(goDir, 'go.mod'), 'utf8');
+  assert.ok(goModContent.includes('module github.com/original-owner/my-go-module'), 'go.mod module identity was preserved intact');
+  assert.ok(!goModContent.includes('different-owner/renamed-remote'), 'go.mod was NOT rewritten from git remote');
+
+  const p = getProject(projGoId);
+  assert.equal(p.repository_url, 'git@github.com:different-owner/renamed-remote.git');
+});
+
+test('TaskRecovery: recoverBlockedTask, TaskContextSnapshot, and findRecoverableTask strict precedence', async () => {
+  const { isTaskRecoverable, findRecoverableTask, recoverBlockedTask } = await import('../src/services/task-service.js');
+  const { TaskContextService } = await import('../src/services/task-context-service.js');
+
+  const taskRepo = makeTempGitRepo('task-recov-');
+  writeFileSync(join(taskRepo, 'task_work.txt'), 'Initial work done by worker\n');
+  const pId = 'proj-recov-' + Date.now();
+  const pSlug = 'recov-' + Date.now();
+  dbRun(
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
+     VALUES (?, 'Recov Proj', ?, ?, 'main', '{}')`,
+    [pId, pSlug, taskRepo]
+  );
+
+  const tId1 = 'task-recov-1-' + Date.now();
+  const sId1 = 'sess-recov-1-' + Date.now();
+  dbRun(
+    `INSERT INTO sessions (id, session_type, project_id, title) VALUES (?, 'project', ?, 'Recov Sess')`,
+    [sId1, pId]
+  );
+  dbRun(
+    `INSERT INTO tasks (id, project_id, session_id, prompt, status, execution_status, workflow_status, exit_code)
+     VALUES (?, ?, ?, 'Build feature task 1', 'blocked', 'completed', 'blocked', 0)`,
+    [tId1, pId, sId1]
+  );
+
+  // isTaskRecoverable verification
+  const tRow = dbGetOne('SELECT * FROM tasks WHERE id = ?', [tId1]);
+  assert.equal(isTaskRecoverable(tRow), true);
+
+  // Precedence 1: Explicit task ID
+  const found1 = findRecoverableTask({ taskId: tId1 });
+  assert.equal(found1?.id, tId1);
+
+  // Precedence 2: Session ID
+  const found2 = findRecoverableTask({ sessionId: sId1 });
+  assert.equal(found2?.id, tId1);
+
+  // Precedence 3: Unambiguous project
+  const found3 = findRecoverableTask({ projectId: pId });
+  assert.equal(found3?.id, tId1);
+
+  // Ambiguity check: Create second recoverable task for same project
+  const tId2 = 'task-recov-2-' + Date.now();
+  dbRun(
+    `INSERT INTO tasks (id, project_id, session_id, prompt, status, execution_status, workflow_status, exit_code)
+     VALUES (?, ?, ?, 'Build feature task 2', 'blocked', 'completed', 'blocked', 0)`,
+    [tId2, pId, sId1]
+  );
+
+  let ambigThrew = false;
+  try {
+    findRecoverableTask({ projectId: pId });
+  } catch (err) {
+    ambigThrew = true;
+    assert.equal(err.ambiguous, true);
+    assert.ok(err.candidates.includes(tId1) && err.candidates.includes(tId2));
+  }
+  assert.equal(ambigThrew, true);
+
+  // Recovery execution: advances to awaiting_approval
+  const recovResult = await recoverBlockedTask(tId1, {
+    remoteUrl: 'git@github.com:example/recov-repo.git'
+  });
+  assert.equal(recovResult.workflow_status, 'awaiting_approval');
+  assert.equal(recovResult.workflowResult.status, 'awaiting_approval');
+  assert.ok(recovResult.workflowResult.approvalRequest);
+
+  // Snapshot validation
+  const snap = TaskContextService.getSnapshot(tId1);
+  assert.ok(snap);
+  assert.equal(snap.task_id, tId1);
+  assert.equal(snap.workflow_status, 'awaiting_approval');
+  assert.equal(snap.recovery_attempts, 1);
+});
+
+test('REST API: /tasks/recoverable, /tasks/:id/recover, and /tasks/:id/context', async () => {
+  const repo = makeTempGitRepo('rest-recov-');
+  const pId = 'proj-api-recov-' + Date.now();
+  const pSlug = 'api-recov-' + Date.now();
+  dbRun(
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
+     VALUES (?, 'API Recov Proj', ?, ?, 'main', '{}')`,
+    [pId, pSlug, repo]
+  );
+  const tId = 'task-api-recov-' + Date.now();
+  dbRun(
+    `INSERT INTO tasks (id, project_id, prompt, status, execution_status, workflow_status, exit_code)
+     VALUES (?, ?, 'REST recovery prompt', 'blocked', 'completed', 'blocked', 0)`,
+    [tId, pId]
+  );
+
+  // 1. GET /tasks/recoverable
+  const recovRes = await req(`/tasks/recoverable?taskId=${tId}`);
+  assert.equal(recovRes.status, 200);
+  assert.equal(recovRes.body.id, tId);
+
+  // 2. POST /tasks/:id/recover
+  const postRes = await req(`/tasks/${tId}/recover`, 'POST', {
+    remoteUrl: 'git@github.com:example/api-recov.git'
+  });
+  assert.equal(postRes.status, 200);
+  assert.equal(postRes.body.workflow_status, 'awaiting_approval');
+
+  // 3. GET /tasks/:id/context
+  const ctxRes = await req(`/tasks/${tId}/context`);
+  assert.equal(ctxRes.status, 200);
+  assert.equal(ctxRes.body.task_id, tId);
+  assert.equal(ctxRes.body.expected_target_repository, 'git@github.com:example/api-recov.git');
 });

@@ -5,6 +5,12 @@ import { spawn } from 'node:child_process';
 import { dbGetOne, dbRun, dbGet } from '../database/db.js';
 import { getProject, validateProjectWorkspace } from './project-service.js';
 import { emitWebSocketEvent } from '../realtime/event-bus.js';
+import { GitOperations } from './git-operations.js';
+import { WorkflowService } from './workflow-service.js';
+import { ModelResolver } from './model-resolver.js';
+import { ModelRouter } from './model-router.js';
+import { ModelRegistry } from './model-registry.js';
+import { ModelFailover } from './model-failover.js';
 import {
   OPENCODE_BIN,
   NINEROUTER_API_KEY,
@@ -255,7 +261,21 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
     // Update session state to active
     dbRun("UPDATE sessions SET status = 'active', updated_at = datetime('now') WHERE id = ?", [session.id]);
 
-    const targetModel = model || session.model || DEFAULT_MODEL;
+    let baseline = null;
+    if (session.project_id && session.session_type !== 'standalone') {
+      try {
+        baseline = GitOperations.captureBaseline(workingDir);
+      } catch {}
+    }
+
+    const plan = ModelResolver.resolveExecutionPlan({
+      sessionId: session.id,
+      projectId: session.project_id,
+      role: 'worker',
+      prompt,
+      preferredModel: model || session.model
+    });
+    const targetModel = plan.openCodeModel;
     const args = ['run', '-m', targetModel, '--auto', '--format', 'json'];
 
     // Session continuation via real OpenCode session ID
@@ -270,12 +290,20 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
     }
 
     logger.info({ sessionId: session.id, model: targetModel, workingDir, hasSessionId: !!session.opencode_session_id }, 'Spawning OpenCode session message execution');
-    emitWebSocketEvent('session.started', null, { sessionId: session.id, projectId: session.project_id });
+    emitWebSocketEvent('session.routing', null, {
+      sessionId: session.id,
+      projectId: session.project_id,
+      model: plan.model,
+      effort: plan.effort,
+      openCodeModel: plan.openCodeModel,
+      selectionSource: plan.selectionSource,
+      reason: plan.reason
+    });
+    emitWebSocketEvent('session.started', null, { sessionId: session.id, projectId: session.project_id, model: targetModel });
 
-    const env = {
-      ...process.env,
+    const env = GitOperations.getWorkerEnv({
       NINEROUTER_API_KEY: NINEROUTER_API_KEY
-    };
+    });
 
     return new Promise((resolve, reject) => {
       let child;
@@ -352,6 +380,10 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
           stdoutBuffer = '';
         }
         if (code === 0) {
+          try {
+            ModelRegistry.recordExecutionSuccess(targetModel);
+            ModelRouter.recordOutcome({ modelId: targetModel, category: 'general_conversation', verified: true });
+          } catch {}
           const finalResponse = assistantResponse.trim() || stdoutText.trim();
           const assistantMsgId = randomUUID();
           dbRun(
@@ -364,6 +396,23 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
             [capturedSessionId, session.id]
           );
           emitWebSocketEvent('session.completed', null, { sessionId: session.id, response: finalResponse, status: 'completed' });
+
+          if (session.project_id && session.session_type !== 'standalone') {
+            try {
+              const modifiedFiles = GitOperations.getTaskOwnedChanges(workingDir, baseline);
+              if (modifiedFiles.length > 0) {
+                WorkflowService.startCompletionWorkflow({
+                  projectId: session.project_id,
+                  prompt,
+                  taskFiles: modifiedFiles,
+                  baseline
+                }).catch(err => logger.error({ sessionId: session.id, err: err.message }, 'Session completion workflow error'));
+              }
+            } catch (err) {
+              logger.error({ sessionId: session.id, err: err.message }, 'Failed checking modified files for session');
+            }
+          }
+
           resolve({
             sessionId: session.id,
             opencodeSessionId: capturedSessionId,
@@ -371,6 +420,11 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
             status: 'idle'
           });
         } else {
+          try {
+            const failClass = ModelFailover.classifyFailure({ exitCode: code, stderr: stderrText || stdoutText });
+            ModelRegistry.recordExecutionFailure(targetModel, failClass.category);
+            ModelRouter.recordOutcome({ modelId: targetModel, category: 'general_conversation', verified: false });
+          } catch {}
           dbRun("UPDATE sessions SET status = 'interrupted', updated_at = datetime('now') WHERE id = ?", [session.id]);
           const errMsg = `OpenCode execution failed with exit code ${code}: ${stderrText || stdoutText}`;
           emitWebSocketEvent('session.failed', null, { sessionId: session.id, error: errMsg });

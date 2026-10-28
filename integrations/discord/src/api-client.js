@@ -216,6 +216,38 @@ export class OrchestratorApiClient {
     return this.request(`/tasks/${taskId}/events?afterSequence=${afterSequence}`);
   }
 
+  async getTaskContext(taskId) {
+    return this.request(`/tasks/${taskId}/context`);
+  }
+
+  async findRecoverableTask(query = {}) {
+    const params = new URLSearchParams();
+    if (query.taskId) params.set('taskId', query.taskId);
+    if (query.sessionId) params.set('sessionId', query.sessionId);
+    if (query.projectId) params.set('projectId', query.projectId);
+    if (query.projectSlug) params.set('projectSlug', query.projectSlug);
+    const qs = params.toString();
+    return this.request(`/tasks/recoverable${qs ? `?${qs}` : ''}`);
+  }
+
+  async recoverTask(taskId, options = {}) {
+    return this.request(`/tasks/${taskId}/recover`, {
+      method: 'POST',
+      body: options
+    });
+  }
+
+  async configureGitRemote(projectId, options = {}) {
+    return this.request(`/projects/${projectId}/git/remote`, {
+      method: 'POST',
+      body: options
+    });
+  }
+
+  async getProjectGitState(projectId) {
+    return this.request(`/projects/${projectId}/git/state`);
+  }
+
   async cancelTask(taskId) {
     return this.request(`/tasks/${taskId}/cancel`, {
       method: 'POST',
@@ -264,6 +296,17 @@ export class OrchestratorApiClient {
 
   async getApproval(approvalId) {
     return this.request(`/approvals/${approvalId}`);
+  }
+
+  async getApprovalByDiscordMessage(messageId) {
+    return this.request(`/approvals/by-discord-message/${encodeURIComponent(messageId)}`);
+  }
+
+  async updateApprovalDiscordMessage(approvalId, { messageId, channelId }) {
+    return this.request(`/approvals/${approvalId}/discord-message`, {
+      method: 'PATCH',
+      body: { messageId, channelId }
+    });
   }
 
   async decideApproval(approvalId, { decision, userId }) {

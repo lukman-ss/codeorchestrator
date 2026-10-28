@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -e
+
+# ponytail: simple argument scan interceptor; upgrade to full git subcommand parser if needed.
+BLOCKED_CMDS=("push" "send-pack")
+
+for arg in "$@"; do
+  for blocked in "${BLOCKED_CMDS[@]}"; do
+    if [ "$arg" = "$blocked" ]; then
+      echo "CodeOrchestrator Security: 'git $blocked' is blocked in worker sandbox. All push operations require human approval gate." >&2
+      exit 1
+    fi
+  done
+done
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REAL_GIT=""
+
+IFS=':' read -ra PATH_DIRS <<< "$PATH"
+for dir in "${PATH_DIRS[@]}"; do
+  [ -z "$dir" ] && continue
+  norm_dir="$(cd "$dir" 2>/dev/null && pwd || true)"
+  if [ -n "$norm_dir" ] && [ "$norm_dir" != "$SELF_DIR" ] && [ -x "$norm_dir/git" ]; then
+    REAL_GIT="$norm_dir/git"
+    break
+  fi
+done
+
+if [ -z "$REAL_GIT" ]; then
+  if [ -x "/usr/bin/git" ]; then
+    REAL_GIT="/usr/bin/git"
+  elif [ -x "/bin/git" ]; then
+    REAL_GIT="/bin/git"
+  else
+    echo "git: command not found" >&2
+    exit 127
+  fi
+fi
+
+exec "$REAL_GIT" "$@"

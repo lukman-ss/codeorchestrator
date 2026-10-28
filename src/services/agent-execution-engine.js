@@ -9,6 +9,11 @@ import { TaskLogger } from './task-logger.js';
 import { ParallelScheduler } from './parallel-scheduler.js';
 import logger from '../logger.js';
 import { emitWebSocketEvent } from '../realtime/event-bus.js';
+import { GitOperations } from './git-operations.js';
+import { ModelResolver } from './model-resolver.js';
+import { ModelRouter } from './model-router.js';
+import { ModelRegistry } from './model-registry.js';
+import { ModelFailover } from './model-failover.js';
 
 const BUFFER_SIZE = 200;
 export const activeExecutions = new Map();
@@ -67,13 +72,20 @@ export class AgentExecutionEngine {
 
     emitWebSocketEvent('agent.started', subtask, { executionId, role: 'worker' });
 
-    const targetModel = model || DEFAULT_MODEL;
+    const plan = ModelResolver.resolveExecutionPlan({
+      jobId: subtask.job_id,
+      projectId: subtask.project_id,
+      role: 'worker',
+      prompt: subtask.prompt,
+      preferredModel: model || subtask.model
+    });
+    const targetModel = plan.openCodeModel;
     const args = ['run', '-m', targetModel, '--auto', '--format', 'json'];
     const useStdin = Buffer.byteLength(subtask.prompt || '', 'utf8') > 32768;
     if (!useStdin && subtask.prompt) {
       args.push(subtask.prompt);
     }
-    const env = { ...process.env, NINEROUTER_API_KEY };
+    const env = GitOperations.getWorkerEnv({ NINEROUTER_API_KEY });
 
     const child = spawn(OPENCODE_BIN, args, { cwd: workspacePath, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
     if (useStdin && subtask.prompt) {
@@ -195,13 +207,20 @@ Do NOT fabricate evidence. Execute relevant verification commands.` +
 
     emitWebSocketEvent('audit.started', subtask, { executionId, role: isRepair ? 'repair' : 'auditor' });
 
-    const targetAuditModel = auditModel || DEFAULT_MODEL;
+    const plan = ModelResolver.resolveExecutionPlan({
+      jobId: subtask.job_id,
+      projectId: subtask.project_id,
+      role: isRepair ? 'repair' : 'auditor',
+      prompt: auditPrompt,
+      preferredModel: auditModel
+    });
+    const targetAuditModel = plan.openCodeModel;
     const args = ['run', '-m', targetAuditModel, '--auto', '--format', 'json'];
     const useStdin = Buffer.byteLength(auditPrompt || '', 'utf8') > 32768;
     if (!useStdin && auditPrompt) {
       args.push(auditPrompt);
     }
-    const env = { ...process.env, NINEROUTER_API_KEY };
+    const env = GitOperations.getWorkerEnv({ NINEROUTER_API_KEY });
     const child = spawn(OPENCODE_BIN, args, { cwd: subtask.worktree_path || project.workspace_path, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
     if (useStdin && auditPrompt) {
       child.stdin.end(auditPrompt, 'utf8');

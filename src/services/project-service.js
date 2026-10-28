@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, existsSync, lstatSync, rmSync, readFileSync } from 'node:fs';
+import { mkdirSync, existsSync, lstatSync, rmSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve, basename, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { WORKSPACE_ROOT } from '../config.js';
 import { dbGet, dbRun, dbGetOne } from '../database/db.js';
+import { GitOperations } from './git-operations.js';
 
 export const generateSlug = (name) => {
   if (!name || typeof name !== 'string') return '';
@@ -105,6 +106,25 @@ export const resolveWorkspacePath = (slug, workspaceRoot = WORKSPACE_ROOT) => {
     const stat = lstatSync(target);
     if (stat.isSymbolicLink()) {
       throw new Error('Symlink escape detected');
+    }
+    const canonical = realpathSync(target);
+    if (!canonical.startsWith(root + sep) && canonical !== root) {
+      throw new Error('Symlink escape detected');
+    }
+  }
+  return target;
+};
+
+export const assertWithinWorkspace = (targetPath, workspacePath) => {
+  const ws = resolve(workspacePath);
+  const target = resolve(ws, targetPath);
+  if (!target.startsWith(ws + sep) && target !== ws) {
+    throw new Error(`Access Denied: Path '${targetPath}' escapes workspace boundary`);
+  }
+  if (existsSync(target)) {
+    const canonical = realpathSync(target);
+    if (!canonical.startsWith(ws + sep) && canonical !== ws) {
+      throw new Error(`Access Denied: Canonical path '${canonical}' escapes workspace boundary`);
     }
   }
   return target;
@@ -585,5 +605,63 @@ export const repairProject = (id, { repoUrl, defaultBranch, confirm = false, use
 
   vals.push(project.id);
   dbRun(`UPDATE projects SET ${set.join(', ')}, updated_at = datetime('now') WHERE id = ?`, vals);
+  return getProject(project.id);
+};
+
+export const getProjectGitState = (projectId) => {
+  const project = typeof projectId === 'string' ? getProject(projectId) : projectId;
+  return GitOperations.getGitState(project.workspace_path);
+};
+
+export const configureProjectGitRemote = (projectId, { repoUrl, defaultBranch, initIfMissing = true } = {}) => {
+  const project = getProject(projectId);
+  if (!repoUrl) throw new Error('Repository URL is required');
+  const check = validateGitHubUrl(repoUrl, { allowLocal: Boolean(project.is_test) || process.env.NODE_ENV === 'test' });
+  if (!check.valid) throw new Error(check.error);
+
+  const workspacePath = project.workspace_path;
+  if (!existsSync(workspacePath)) {
+    throw new Error(`Workspace directory does not exist: ${workspacePath}`);
+  }
+
+  // Check Ballo mismatch
+  const isBallo = (project.slug && project.slug.toLowerCase().includes('ballo')) ||
+                  (project.name && project.name.toLowerCase().includes('ballo'));
+  if (isBallo && (repoUrl.toLowerCase().includes('codeorchestrator') || repoUrl.toLowerCase().includes('coding-orchestrator'))) {
+    throw new Error('Critical repository mismatch: cannot configure codeorchestrator remote on ballo project');
+  }
+
+  // Ensure git initialized
+  if (!GitOperations.isGitRepo(workspacePath)) {
+    if (initIfMissing) {
+      GitOperations.initLocalGit(workspacePath, defaultBranch || project.default_branch || 'main');
+    } else {
+      throw new Error('Workspace is not a git repository');
+    }
+  }
+
+  // Configure remote
+  GitOperations.configureRemote(workspacePath, repoUrl, 'origin');
+
+  // Update project metadata and database
+  const metadata = { ...(project.metadata || {}) };
+  metadata.gitRemoteConfiguredAt = new Date().toISOString();
+  metadata.expectedRepoUrl = repoUrl;
+
+  const effectiveBranch = defaultBranch || project.default_branch || 'main';
+  const provider = repoUrl.includes('github.com') || repoUrl.includes('github-coding') ? 'github' : 'custom';
+
+  dbRun(
+    `UPDATE projects SET
+      repo_url = ?,
+      repository_url = ?,
+      default_branch = ?,
+      repository_provider = ?,
+      metadata_json = ?,
+      updated_at = datetime('now')
+    WHERE id = ?`,
+    [repoUrl, repoUrl, effectiveBranch, provider, JSON.stringify(metadata), project.id]
+  );
+
   return getProject(project.id);
 };

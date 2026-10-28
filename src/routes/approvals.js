@@ -4,7 +4,7 @@ import { WorkflowService } from '../services/workflow-service.js';
 import { dbGetOne, dbGet } from '../database/db.js';
 
 const decideSchema = z.object({
-  decision: z.enum(['push', 'keep_local', 'reject']),
+  decision: z.enum(['push', 'keep_local', 'reject', 'create_pr']),
   userId: z.string().min(1)
 });
 
@@ -46,6 +46,31 @@ export default async function approvals(app) {
     } catch (err) {
       const code = err.statusCode || (err.message.includes('not found') ? 404 : 400);
       reply.code(code).send({ error: err.message });
+    }
+  });
+
+  // Update associated Discord message ID for approval card
+  app.patch('/approvals/:id/discord-message', async (req, reply) => {
+    try {
+      const { messageId, channelId } = req.body || {};
+      const updated = ApprovalService.updateDiscordMessage(req.params.id, { messageId, channelId });
+      reply.send(updated);
+    } catch (err) {
+      reply.code(500).send({ error: err.message });
+    }
+  });
+
+  // Get approval request by associated Discord message ID
+  app.get('/approvals/by-discord-message/:messageId', async (req, reply) => {
+    try {
+      const item = ApprovalService.getApprovalRequestByDiscordMessage(req.params.messageId);
+      if (!item) {
+        reply.code(404).send({ error: 'Approval request not found for discord message' });
+        return;
+      }
+      reply.send(item);
+    } catch (err) {
+      reply.code(500).send({ error: err.message });
     }
   });
 

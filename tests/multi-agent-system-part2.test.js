@@ -53,9 +53,18 @@ test('Test G: Parallel Workers', async () => {
 
   const taskIds = [subtask1.body.id, subtask2.body.id, subtask3.body.id];
 
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 60; i++) {
     await new Promise(r => setTimeout(r, 1000));
     const statuses = await Promise.all(taskIds.map(id => req(`/tasks/${id}`)));
+    for (const s of statuses) {
+      if (s.body.workflow_status === 'awaiting_approval') {
+        const pending = await req('/approvals/pending');
+        const app = (pending.body || []).find(a => a.task_id === s.body.id);
+        if (app) {
+          await req(`/approvals/${app.id}/decide`, 'POST', { decision: 'keep_local', userId: 'tester' });
+        }
+      }
+    }
     const allDone = statuses.every(s => ['completed', 'failed'].includes(s.body.status));
     if (allDone) break;
   }
@@ -89,7 +98,15 @@ test('Test H: Dependency Scheduling', async () => {
   let baseStatus;
   for (let i = 0; i < 25; i++) {
     await new Promise(r => setTimeout(r, 2000));
-    baseStatus = (await req(`/tasks/${baseTask.body.id}`)).body.status;
+    const curTask = (await req(`/tasks/${baseTask.body.id}`)).body;
+    if (curTask.workflow_status === 'awaiting_approval') {
+      const pending = await req('/approvals/pending');
+      const app = (pending.body || []).find(a => a.task_id === curTask.id);
+      if (app) {
+        await req(`/approvals/${app.id}/decide`, 'POST', { decision: 'keep_local', userId: 'tester' });
+      }
+    }
+    baseStatus = curTask.status;
     if (['completed', 'failed'].includes(baseStatus)) break;
   }
 
@@ -109,7 +126,11 @@ test('Test I: Crash Recovery', async () => {
   });
   const taskId = taskRes.body.id;
 
-  await new Promise(r => setTimeout(r, 1000));
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 200));
+    const cur = await req(`/tasks/${taskId}`);
+    if (cur.body?.status === 'running') break;
+  }
 
   const health = await req('/health');
   serverPID = health.body.pid;

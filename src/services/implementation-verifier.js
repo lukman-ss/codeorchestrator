@@ -4,6 +4,23 @@ import { execSync } from 'node:child_process';
 import logger from '../logger.js';
 
 export class ImplementationVerifier {
+  static getExecEnv() {
+    const home = process.env.HOME || '/home/lukman-ss';
+    const candidatePaths = [
+      join(home, '.local/go/bin'),
+      join(home, '.local/bin'),
+      join(home, '.local/npm/bin'),
+      '/usr/local/go/bin',
+      '/tmp/go/bin',
+      process.env.PATH || ''
+    ].filter(Boolean);
+
+    return {
+      ...process.env,
+      PATH: candidatePaths.join(':')
+    };
+  }
+
   static detectStack(workspacePath) {
     if (existsSync(join(workspacePath, 'go.mod'))) return 'Go';
     if (existsSync(join(workspacePath, 'package.json'))) return 'Node.js';
@@ -14,11 +31,12 @@ export class ImplementationVerifier {
 
   static runStackChecks(workspacePath, stack, taskFiles = []) {
     const results = [];
+    const execEnv = this.getExecEnv();
 
     if (stack === 'Go') {
       // Check gofmt
       try {
-        const fmtOutput = execSync('gofmt -l .', { cwd: workspacePath, stdio: 'pipe' }).toString().trim();
+        const fmtOutput = execSync('gofmt -l .', { cwd: workspacePath, stdio: 'pipe', env: execEnv }).toString().trim();
         results.push({
           check: 'gofmt',
           passed: fmtOutput.length === 0,
@@ -30,7 +48,7 @@ export class ImplementationVerifier {
 
       // Check go vet
       try {
-        const vetOut = execSync('go vet ./...', { cwd: workspacePath, stdio: 'pipe' }).toString().trim();
+        const vetOut = execSync('go vet ./...', { cwd: workspacePath, stdio: 'pipe', env: execEnv }).toString().trim();
         results.push({ check: 'go vet', passed: true, output: vetOut || 'go vet passed.' });
       } catch (err) {
         results.push({ check: 'go vet', passed: false, output: err.stderr?.toString() || err.message });
@@ -38,7 +56,7 @@ export class ImplementationVerifier {
 
       // Check go test
       try {
-        const testOut = execSync('go test ./...', { cwd: workspacePath, stdio: 'pipe', timeout: 30000 }).toString().trim();
+        const testOut = execSync('go test ./...', { cwd: workspacePath, stdio: 'pipe', timeout: 30000, env: execEnv }).toString().trim();
         results.push({ check: 'go test', passed: true, output: testOut });
       } catch (err) {
         results.push({ check: 'go test', passed: false, output: err.stderr?.toString() || err.stdout?.toString() || err.message });
@@ -50,7 +68,7 @@ export class ImplementationVerifier {
           const full = join(workspacePath, rel);
           if (existsSync(full)) {
             try {
-              execSync(`node --check "${full}"`, { cwd: workspacePath, stdio: 'pipe' });
+              execSync(`node --check "${full}"`, { cwd: workspacePath, stdio: 'pipe', env: execEnv });
               results.push({ check: `syntax:${rel}`, passed: true, output: 'Syntax valid.' });
             } catch (err) {
               results.push({ check: `syntax:${rel}`, passed: false, output: err.stderr?.toString() || err.message });
@@ -65,7 +83,7 @@ export class ImplementationVerifier {
         if (existsSync(pkgPath)) {
           const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
           if (pkg.scripts && pkg.scripts.test && !pkg.scripts.test.includes('no test specified')) {
-            const npmOut = execSync('npm test', { cwd: workspacePath, stdio: 'pipe', timeout: 30000 }).toString().trim();
+            const npmOut = execSync('npm test', { cwd: workspacePath, stdio: 'pipe', timeout: 30000, env: execEnv }).toString().trim();
             results.push({ check: 'npm test', passed: true, output: npmOut.slice(0, 500) });
           }
         }

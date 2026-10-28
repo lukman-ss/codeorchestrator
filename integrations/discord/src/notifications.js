@@ -32,13 +32,30 @@ export {
 };
 
 export const formatJobCard = (job, { projectSlug = '', agents = null, latestEvent = null } = {}) => {
-  const status = job.status || 'pending';
+  let status = job.status || 'pending';
+  if (job.workflow_status === 'blocked' || status === 'blocked') {
+    status = 'blocked';
+  }
   const total = job.total_requirements || 0;
   const verified = job.verified_requirements || 0;
   const proj = projectSlug || job.project_slug || job.project_id || 'unknown';
 
   const titleStatus = status.charAt(0).toUpperCase() + status.slice(1);
   const safeLatest = latestEvent ? (String(latestEvent).length > 150 ? String(latestEvent).slice(0, 147) + '...' : String(latestEvent)) : null;
+
+  if (status === 'blocked') {
+    const reasonStr = job.error || latestEvent || (job.final_audit_verdict ? `Verdict: ${job.final_audit_verdict}` : 'Completion workflow checks blocked');
+    return redactSensitive([
+      '```',
+      'CodeOrchestrator',
+      `Job: ${job.id}`,
+      `Project: ${proj}`,
+      `Status: Blocked`,
+      `Reason: ${String(reasonStr).length > 150 ? String(reasonStr).slice(0, 147) + '...' : reasonStr}`,
+      `Requirements: ${verified}/${total} verified`,
+      '```'
+    ].join('\n'));
+  }
 
   if (status === 'completed') {
     const finalAudit = job.final_audit_verdict === 'PASS' ? 'PASS' : (job.final_audit_verdict || 'UNVERIFIED');
@@ -55,7 +72,7 @@ export const formatJobCard = (job, { projectSlug = '', agents = null, latestEven
     ].join('\n'));
   }
 
-  if (status === 'cancelled' || status === 'failed' || status === 'blocked' || status === 'partially_completed') {
+  if (status === 'cancelled' || status === 'failed' || status === 'partially_completed') {
     return redactSensitive([
       '```',
       'CodeOrchestrator',
@@ -103,10 +120,37 @@ export const formatJobCard = (job, { projectSlug = '', agents = null, latestEven
 };
 
 export const formatTaskCard = (task, { projectSlug = '', latestEvent = null } = {}) => {
-  const status = task.status || 'queued';
+  let status = task.status || 'queued';
+  if (task.workflow_status === 'blocked' || status === 'blocked') {
+    status = 'blocked';
+  } else if (task.workflow_status === 'awaiting_approval' || status === 'awaiting_approval') {
+    status = 'awaiting_approval';
+  } else if (task.workflow_status === 'verifying' || status === 'verifying') {
+    status = 'verifying';
+  } else if (task.workflow_status === 'auditing' || status === 'auditing') {
+    status = 'auditing';
+  } else if (task.workflow_status === 'git_review' || status === 'git_review') {
+    status = 'git_review';
+  }
+
   const proj = projectSlug || task.project_slug || task.project_id || 'unknown';
   const titleStatus = status.charAt(0).toUpperCase() + status.slice(1);
   const safeLatest = latestEvent ? (String(latestEvent).length > 150 ? String(latestEvent).slice(0, 147) + '...' : String(latestEvent)) : null;
+
+  if (status === 'blocked') {
+    const reasonStr = task.error || latestEvent || 'Completion workflow checks blocked';
+    const safeReason = String(reasonStr).length > 150 ? String(reasonStr).slice(0, 147) + '...' : String(reasonStr);
+    return redactSensitive([
+      '```',
+      'CodeOrchestrator',
+      `Task: ${task.id}`,
+      `Project: ${proj}`,
+      `Status: Blocked`,
+      `Reason: ${safeReason}`,
+      `Exit Code: ${task.exit_code ?? 0}`,
+      '```'
+    ].join('\n'));
+  }
 
   if (status === 'completed') {
     return redactSensitive([
@@ -118,6 +162,30 @@ export const formatTaskCard = (task, { projectSlug = '', latestEvent = null } = 
       `Exit Code: ${task.exit_code ?? 0}`,
       '```'
     ].join('\n'));
+  }
+
+  if (status === 'awaiting_approval') {
+    return redactSensitive([
+      '```',
+      'CodeOrchestrator',
+      `Task: ${task.id}`,
+      `Project: ${proj}`,
+      `Status: Awaiting Approval`,
+      safeLatest ? `Latest: ${safeLatest}` : 'Ready for human review and git commit',
+      '```'
+    ].filter(Boolean).join('\n'));
+  }
+
+  if (status === 'verifying' || status === 'auditing' || status === 'git_review') {
+    return redactSensitive([
+      '```',
+      'CodeOrchestrator',
+      `Task: ${task.id}`,
+      `Project: ${proj}`,
+      `Status: ${titleStatus}`,
+      safeLatest ? `Latest: ${safeLatest}` : '',
+      '```'
+    ].filter(Boolean).join('\n'));
   }
 
   if (status === 'failed' || status === 'cancelled' || status === 'interrupted') {
@@ -139,6 +207,7 @@ export const formatTaskCard = (task, { projectSlug = '', latestEvent = null } = 
       'CodeOrchestrator',
       `Task: ${task.id}`,
       `Project: ${proj}`,
+      task.model ? `Model: ${task.model}` : '',
       `Status: Running`,
       safeLatest ? `Latest: ${safeLatest}` : '',
       '```'
@@ -154,6 +223,21 @@ export const formatTaskCard = (task, { projectSlug = '', latestEvent = null } = 
     task.prompt ? `Prompt: ${task.prompt.slice(0, 80)}${task.prompt.length > 80 ? '...' : ''}` : '',
     '```'
   ].filter(Boolean).join('\n'));
+};
+
+export const formatModelSwitchCard = ({ taskId, previousModel, nextModel, reason }) => {
+  return redactSensitive([
+    '```',
+    'CodeOrchestrator',
+    `Task: ${taskId}`,
+    'Model Switch: Initiated',
+    `Previous Model: ${previousModel}`,
+    `New Model: ${nextModel}`,
+    `Reason: ${reason || 'Adaptive failover'}`,
+    'Task Context: Preserved',
+    'Status: RECOVERING',
+    '```'
+  ].join('\n'));
 };
 
 export const formatAuditReport = (audits, subtaskId) => {
@@ -309,16 +393,38 @@ export const formatExecutionStartedCard = (submission, { projectSlug = '' } = {}
 
 export const formatExecutionResultCard = (submission, result, { projectSlug = '' } = {}) => {
   const status = result?.status || (result?.error ? 'failed' : 'completed');
-  const isPass = status === 'completed' || (!result?.error && result?.status !== 'failed');
-  const icon = isPass ? '✅' : '❌';
+  const workflowStatus = result?.workflow_status || result?.workflowStatus;
+  const executionStatus = result?.execution_status || (status === 'queued' || status === 'running' ? status : (result?.error ? 'failed' : 'completed'));
+
+  let title;
+  if (status === 'queued') {
+    title = '### ⏳ TASK ACCEPTED - QUEUED';
+  } else if (status === 'running') {
+    title = '### 🚀 Execution Started';
+  } else if (workflowStatus === 'blocked' || status === 'blocked') {
+    title = '### 🛑 Workflow Blocked';
+  } else if (workflowStatus === 'awaiting_approval' || status === 'awaiting_approval') {
+    title = '### 🔍 Awaiting Git Approval';
+  } else if (status === 'completed' && workflowStatus === 'completed') {
+    title = '### ✅ Execution & Workflow Completed';
+  } else if (status === 'completed') {
+    title = '### ✅ Execution Completed';
+  } else if (status === 'failed') {
+    title = '### ❌ Execution Failed';
+  } else {
+    title = `### ℹ️ Execution ${status}`;
+  }
   const responseText = result?.response || result?.output || result?.error || '_(No response returned)_';
   const sanitized = redactSensitive(responseText);
 
   const header = [
-    `### ${icon} Execution ${isPass ? 'Completed' : 'Failed'}`,
+    title,
     `**Submission ID**: \`${submission.id}\``,
     submission.execution_id ? `**Execution ID**: \`${submission.execution_id}\`` : '',
-    `**Status**: ${status}`
+    `**Status**: ${status}`,
+    executionStatus ? `**Execution Status**: ${executionStatus}${result?.exit_code !== undefined ? ` (exit code ${result.exit_code})` : ''}` : '',
+    workflowStatus ? `**Workflow Status**: ${workflowStatus}` : '',
+    result?.error && (workflowStatus === 'blocked' || status === 'blocked') ? `**Blocker Reason**: ${redactSensitive(result.error)}` : ''
   ].filter(Boolean).join('\n');
 
   if (sanitized.length > 1500) {
@@ -375,10 +481,14 @@ export const formatGitReviewCard = (approval, { review = null, projectSlug = '' 
     '',
     `**Proposed Commit**: \`${commitMsg.slice(0, 100)}\``,
     '',
-    'Click **Push to GitHub** to push your commit, or **Keep Local** to preserve files without pushing.'
+    'Click **Create PR** to open a pull request, **Push to GitHub** to push your commit, or **Keep Local** to preserve files without pushing.'
   ].filter(Boolean);
 
   const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`btn_git_pr_${approvalId}`)
+      .setLabel('Create PR')
+      .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
       .setCustomId(`btn_git_push_${approvalId}`)
       .setLabel('Push to GitHub')
@@ -399,7 +509,7 @@ export const formatGitReviewCard = (approval, { review = null, projectSlug = '' 
   };
 };
 
-export const formatGitDecisionResultCard = (approval, decision, { commitSha = null, error = null } = {}) => {
+export const formatGitDecisionResultCard = (approval, decision, { commitSha = null, error = null, prUrl = null, prNumber = null, branchName = null } = {}) => {
   const repo = approval?.repository_identity || 'unknown';
   const branch = approval?.target_branch || 'main';
   const approvalId = approval?.id || 'N/A';
@@ -412,6 +522,23 @@ export const formatGitDecisionResultCard = (approval, decision, { commitSha = nu
         `**Decision**: \`${decision}\``,
         `**Error**: ${error}`
       ].join('\n')),
+      components: []
+    };
+  }
+
+  if (decision === 'create_pr') {
+    return {
+      content: redactSensitive([
+        '### 🔀 Pull Request Created Successfully',
+        `**Approval ID**: \`${approvalId}\``,
+        `**Repository**: \`${repo}\``,
+        `**Target Base**: \`${branch}\``,
+        branchName ? `**Branch**: \`${branchName}\`` : '',
+        prNumber ? `**PR Number**: #${prNumber}` : '',
+        prUrl ? `**PR URL**: ${prUrl}` : '',
+        commitSha ? `**Commit SHA**: \`${commitSha}\`` : '',
+        'Gate 3 complete. Workflow completed.'
+      ].filter(Boolean).join('\n')),
       components: []
     };
   }

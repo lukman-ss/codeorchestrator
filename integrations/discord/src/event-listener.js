@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { randomUUID } from 'node:crypto';
 import config from './config.js';
 import {
   formatJobCard,
@@ -156,13 +157,22 @@ export class OrchestratorEventListener {
     }
   }
 
-  isDuplicate(eventKey) {
+  isDuplicate(eventKey, eventType = null, executionId = null) {
     if (this.processedEvents.has(eventKey)) return true;
+    if (this.persistence && typeof this.persistence.isEventProcessed === 'function') {
+      if (this.persistence.isEventProcessed(eventKey)) {
+        this.processedEvents.add(eventKey);
+        return true;
+      }
+    }
     if (this.processedEvents.size >= this.maxProcessedCache) {
       const first = this.processedEvents.values().next().value;
       this.processedEvents.delete(first);
     }
     this.processedEvents.add(eventKey);
+    if (this.persistence && typeof this.persistence.recordProcessedEvent === 'function') {
+      this.persistence.recordProcessedEvent(eventKey, eventType, executionId);
+    }
     return false;
   }
 
@@ -180,7 +190,7 @@ export class OrchestratorEventListener {
 
     // Deduplication check
     const dedupKey = `${eventType}:${id}:${ev.sequence ?? ev.timestamp ?? JSON.stringify(payload || '')}`;
-    if (this.isDuplicate(dedupKey)) {
+    if (this.isDuplicate(dedupKey, eventType, id)) {
       return;
     }
 
@@ -236,15 +246,15 @@ export class OrchestratorEventListener {
       } else if (eventType === 'git.review.ready' || eventType === 'approval.requested') {
         newStatus = 'awaiting_approval';
         latestEventText = 'Gate 3: Awaiting human approval';
-      } else if (eventType === 'git.push.started') {
+      } else if (eventType === 'git.push.started' || eventType === 'git.pr.started') {
         newStatus = 'pushing';
-        latestEventText = 'Pushing approved changes to GitHub';
-      } else if (eventType === 'git.push.completed') {
+        latestEventText = eventType === 'git.pr.started' ? 'Creating Pull Request' : 'Pushing approved changes to GitHub';
+      } else if (eventType === 'git.push.completed' || eventType === 'git.pr.created') {
         newStatus = 'completed';
-        latestEventText = 'Git push complete';
-      } else if (eventType === 'git.push.failed') {
+        latestEventText = eventType === 'git.pr.created' ? `Pull Request created: ${payload.prUrl || ''}` : 'Git push complete';
+      } else if (eventType === 'git.push.failed' || eventType === 'git.pr.failed') {
         newStatus = 'failed';
-        latestEventText = `Git push failed: ${payload.error || 'error'}`;
+        latestEventText = `Git operation failed: ${payload.error || 'error'}`;
       } else if (eventType === 'workflow.blocked') {
         newStatus = 'blocked';
         latestEventText = `Workflow blocked: ${payload.reason || 'checks failed'}`;
@@ -267,7 +277,25 @@ export class OrchestratorEventListener {
             const channel = await this.discordClient.channels.fetch(exec.channel_id).catch(() => null);
             if (channel) {
               const card = formatGitReviewCard(approval);
-              await safeChannelSend(channel, card, { type: 'git_review_ready' });
+              const sentMsg = await safeChannelSend(channel, card, { type: 'git_review_ready' });
+              if (sentMsg?.id) {
+                if (this.persistence && typeof this.persistence.saveApprovalMessage === 'function') {
+                  this.persistence.saveApprovalMessage({
+                    id: randomUUID(),
+                    approvalId: payload.approvalId,
+                    jobId: id,
+                    guildId: exec.guild_id,
+                    channelId: exec.channel_id,
+                    messageId: sentMsg.id
+                  });
+                }
+                if (this.apiClient && typeof this.apiClient.updateApprovalDiscordMessage === 'function') {
+                  await this.apiClient.updateApprovalDiscordMessage(payload.approvalId, {
+                    messageId: sentMsg.id,
+                    channelId: exec.channel_id
+                  }).catch(() => {});
+                }
+              }
             }
           }
         } catch {}
@@ -318,15 +346,15 @@ export class OrchestratorEventListener {
       } else if (eventType === 'git.review.ready' || eventType === 'approval.requested') {
         newStatus = 'awaiting_approval';
         latestEventText = 'Gate 3: Awaiting human approval';
-      } else if (eventType === 'git.push.started') {
+      } else if (eventType === 'git.push.started' || eventType === 'git.pr.started') {
         newStatus = 'pushing';
-        latestEventText = 'Pushing approved changes to GitHub';
-      } else if (eventType === 'git.push.completed') {
+        latestEventText = eventType === 'git.pr.started' ? 'Creating Pull Request' : 'Pushing approved changes to GitHub';
+      } else if (eventType === 'git.push.completed' || eventType === 'git.pr.created') {
         newStatus = 'completed';
-        latestEventText = 'Git push complete';
-      } else if (eventType === 'git.push.failed') {
+        latestEventText = eventType === 'git.pr.created' ? `Pull Request created: ${payload.prUrl || ''}` : 'Git push complete';
+      } else if (eventType === 'git.push.failed' || eventType === 'git.pr.failed') {
         newStatus = 'failed';
-        latestEventText = `Git push failed: ${payload.error || 'error'}`;
+        latestEventText = `Git operation failed: ${payload.error || 'error'}`;
       } else if (eventType === 'workflow.blocked') {
         newStatus = 'blocked';
         latestEventText = `Workflow blocked: ${payload.reason || 'checks failed'}`;
@@ -349,7 +377,25 @@ export class OrchestratorEventListener {
             const channel = await this.discordClient.channels.fetch(exec.channel_id).catch(() => null);
             if (channel) {
               const card = formatGitReviewCard(approval);
-              await safeChannelSend(channel, card, { type: 'git_review_ready' });
+              const sentMsg = await safeChannelSend(channel, card, { type: 'git_review_ready' });
+              if (sentMsg?.id) {
+                if (this.persistence && typeof this.persistence.saveApprovalMessage === 'function') {
+                  this.persistence.saveApprovalMessage({
+                    id: randomUUID(),
+                    approvalId: payload.approvalId,
+                    taskId: id,
+                    guildId: exec.guild_id,
+                    channelId: exec.channel_id,
+                    messageId: sentMsg.id
+                  });
+                }
+                if (this.apiClient && typeof this.apiClient.updateApprovalDiscordMessage === 'function') {
+                  await this.apiClient.updateApprovalDiscordMessage(payload.approvalId, {
+                    messageId: sentMsg.id,
+                    channelId: exec.channel_id
+                  }).catch(() => {});
+                }
+              }
             }
           }
         } catch {}
@@ -420,8 +466,13 @@ export class OrchestratorEventListener {
     if (isTerminal) {
       if (existing?.timeout) clearTimeout(existing.timeout);
       this.pendingUpdates.delete(id);
-      this.executeMessageEdit(id, exec, content, isTerminal);
-      return;
+      const shouldNotify = typeof this.persistence?.markTerminalNotified === 'function'
+        ? this.persistence.markTerminalNotified(id)
+        : true;
+      if (shouldNotify) {
+        return this.executeMessageEdit(id, exec, content, isTerminal);
+      }
+      return Promise.resolve();
     }
 
     if (existing) {

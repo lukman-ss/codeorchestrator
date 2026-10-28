@@ -15,6 +15,7 @@ node_modules/
 
 # Runtime Database Artifacts
 data/
+backups/
 *.db
 *.db-shm
 *.db-wal
