@@ -196,3 +196,37 @@ curl -X POST http://127.0.0.1:4000/projects/<PROJECT_ID>/repair \
 - Requires `"confirm": true`.
 - Updates database metadata record (`repository_url`, `default_branch`, `metadata.expectedRepoUrl`, `metadata.repairedAt`).
 - Preserves the local filesystem checkout intact.
+
+---
+
+### 4. Repository Role Resolution & Scope Conflict Prevention
+
+To prevent false repository mismatch blocks when specifications cite starter templates, framework dependencies, or documentation examples, CodeOrchestrator uses a domain-aware repository classifier and context resolver (`src/services/repository-classifier.js` and `src/services/project-context-resolver.js`).
+
+#### Authority Precedence Hierarchy
+1. **Server-side authorization and workspace security policy**.
+2. **Explicit project selection** in the current request (`project: <slug>`).
+3. **Registered project metadata and verified Git identity** on disk.
+4. **Existing authorized session association** when continuing conversation.
+5. **Specification repository-role interpretation** (extracting references without assuming they are target repos).
+
+#### Repository Role Classification
+Every Git URL mentioned in a prompt, markdown attachment, or directive is classified into a specific role:
+- `TARGET`: Explicit destination repository requested for modifications (`repo: <url>`, `target repo: <url>`, `configure git remote <url>`).
+- `STARTER`: Foundation or bootstrap template (e.g., `Ballo Starter sebagai fondasi: https://github.com/lukman-ss/ballo-starter`). Treated strictly as a read-only reference.
+- `TEMPLATE`: Boilerplate or sample template. Read-only reference.
+- `FRAMEWORK_DEPENDENCY`: Core framework dependencies (e.g., `https://github.com/lukman-ss/ballo`). Read-only reference.
+- `LIBRARY_DEPENDENCY`: Go modules or npm packages (e.g., `go get github.com/...`).
+- `DOCUMENTATION`: Reference guides and API docs.
+- `EXAMPLE`: Demonstration or sample apps.
+- `EXTERNAL_REFERENCE`: URLs within markdown code blocks, quotes, or unclassified body text.
+
+#### Pre-Execution Scope Conflict Enforcement (`SCOPE_CONFLICT`)
+If a specification explicitly directs modifications against an external repository (e.g., `modify repository directly: https://github.com/lukman-ss/ballo-starter.git`) while operating on a different registered project (e.g., `ballo-todo`), execution is immediately halted **before any task queueing, session creation, or file mutation**:
+- **Status**: Rejected with `SCOPE_CONFLICT`.
+- **Reason**: Shows target repository, requested repository, validation phase (`pre_execution_scope_check`), and recommended action.
+- **Safety**: No workspace directories, files, or Git states are touched.
+
+#### Canonical URL Normalization
+All URL comparisons use canonical normalization (`normalizeGitUrl` / `areEquivalentGitUrls`) rather than raw string matching. HTTPS, SSH SCP (`git@github.com:...`), SSH URI (`ssh://git@github.com/...`), and SSH aliases (`git@github-coding:...`) for the same `owner/repo` resolve to identical canonical identities (`github.com/owner/repo`). Embedded credentials in URLs are rejected outright.
+

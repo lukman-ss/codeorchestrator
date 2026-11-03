@@ -210,7 +210,10 @@ To overcome Discord's 2,000-character single-message ceiling for rich specificat
 
 - **Identity & Remote Verification**: Before running tasks, multi-agent jobs, or creating project sessions, the backend verifies that the local workspace git remote origin matches the registered project identity.
 - **Ballo Protection**: Project `ballo` requires its intended Go repository `https://github.com/lukman-ss/ballo`. If the local workspace points to `codeorchestrator` or any non-Ballo repository, execution is blocked immediately without filesystem mutation or checkout deletion.
+- **Starter Template & Reference Separation**: In natural chat and specification cards, starter URLs (e.g., `https://github.com/lukman-ss/ballo-starter`) or framework dependencies are classified as read-only references (`Starter Repo`), preventing false `Repository Mismatch` rejections on target projects (such as `ballo-todo`).
+- **Remote Configuration in Chat**: Authorized operators can issue `configure git remote <url> and resume task <id>` in natural conversation to update a project's remote and resume blocked Gate 3 completion workflows seamlessly.
 - **Safe Repair Workflow**: When remotes or project configurations change, administrators can invoke `/code project repair project:<id> confirm:True [repourl:<url>]` to update database metadata cleanly without altering or deleting existing files on disk.
+
 
 ---
 

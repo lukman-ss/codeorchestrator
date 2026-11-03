@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.1] - 2026-11-03
 
 ### Added
+- Repository role classification (`STARTER`, `FRAMEWORK_DEPENDENCY`, `TEMPLATE`, `TARGET`, etc.) and authority precedence resolver (`src/services/repository-classifier.js`, `src/services/project-context-resolver.js`).
+- Pre-execution scope conflict guard (`SCOPE_CONFLICT`) preventing unauthorized external repository mutations before worker/agent spawn.
+- Canonical Git URL normalization (`normalizeGitUrl`, `areEquivalentGitUrls`) matching HTTPS, SSH SCP, SSH URI, and configured aliases across case variations.
+- False-mismatch task recovery service (`recoverRepositoryMismatchTask`) progressing blocked tasks directly to Gate 3 without re-running OpenCode.
+- Repository references audit persistence (`repository_references` table).
 - Autonomous AI model selection & failover (router) (commit 9e7462c).
 - 3‑gate completion pipeline & approval service (commit f2056fa).
 - Discord natural‑chat memory, attachments, multipart handling (commits 5e4cd6d, c40c3d6).
@@ -29,12 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workspace remote auto‑conversion SSH↔HTTPS (commit d7c8989).
 
 ### Fixed
-- False repository mismatch on starter URLs (commit 2b80d4e).
-- Redundant terminal state spam (commit 950ac76).
+- False repository mismatch when prompts cite starter templates or foundation repositories (e.g. `ballo-starter` on `ballo-todo`).
 - CLI run ordering & flag removal (commit 0a69df2).
+- Redundant terminal state spam (commit 950ac76).
 - Discord message length limits (commit 463b817).
 
 ### Changed
-- Logger switched to Pino JSON (commit src/logger.js change).
-- Project‑service refactor (commit src/services/project-service.js).
+- Refactored `createTask` and `Supervisor.createJob` to enforce pre-execution project context and scope conflict validation.
+- Updated technical documentation (`docs/project-management.md`, `docs/audit-and-verification.md`, `docs/discord-integration.md`).
+
 

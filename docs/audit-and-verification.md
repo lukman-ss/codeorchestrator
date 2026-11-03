@@ -73,12 +73,15 @@ Before marking any single task or multi-agent job `completed`, the system coordi
 ### Gate 3: Git Review & Human Approval (`ApprovalService` & `GitOperations`)
 - Baseline difference tracking isolates strictly task-owned changes from other workspace modifications.
 - Enforces repository identity validation: checks remote URL against registered project metadata, preventing accidental pushes across repos (such as `ballo` workspace mismatch guards).
+- Audits repository references (`repository_references` table): records classified roles (`STARTER`, `FRAMEWORK_DEPENDENCY`, etc.) and validation decisions for full auditability.
 - Never executes `git add .` or `git add -A`. Only task-owned files are staged.
 - Requires explicit human authorization via Discord interactive buttons or `/code approve` / `/code review`:
   - **Push to GitHub**: Stages task-owned files, commits with structured message, and executes non-interactive push (`GIT_TERMINAL_PROMPT=0`). Blocks on remote divergence.
   - **Keep Local**: Preserves modifications on disk without committing or pushing, transitioning the workflow cleanly to `completed`.
   - **Reject**: Aborts the workflow without pushing.
 - Workflows with 0 modified files (or standalone sessions) complete cleanly without generating empty Git commits.
+- **False-Mismatch Recovery (`POST /tasks/:id/recover`)**: Tasks previously blocked by false repository mismatch can be recovered directly via `recoverRepositoryMismatchTask`, transitioning straight to verification or preserving pending Gate 3 reviews without re-executing OpenCode subprocesses.
+
 
 ---
 
