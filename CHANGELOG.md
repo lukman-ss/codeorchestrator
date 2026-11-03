@@ -17,3 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pre-commit security verification gate (`scripts/security-check.sh`).
 - Pre-release validation pipeline (`scripts/public-release-check.sh`).
 - Comprehensive technical documentation suite across architecture, API, scheduler, and operations.
+
+## [1.0.1] - 2026-11-03
+
+### Added
+- Autonomous AI model selection & failover (router) (commit 9e7462c).
+- 3‑gate completion pipeline & approval service (commit f2056fa).
+- Discord natural‑chat memory, attachments, multipart handling (commits 5e4cd6d, c40c3d6).
+- Async WebSocket streaming for realtime (commit aa42c79).
+- Prompt size enforcement (commit 835adc6).
+- Workspace remote auto‑conversion SSH↔HTTPS (commit d7c8989).
+
+### Fixed
+- False repository mismatch on starter URLs (commit 2b80d4e).
+- Redundant terminal state spam (commit 950ac76).
+- CLI run ordering & flag removal (commit 0a69df2).
+- Discord message length limits (commit 463b817).
+
+### Changed
+- Logger switched to Pino JSON (commit src/logger.js change).
+- Project‑service refactor (commit src/services/project-service.js).
+
