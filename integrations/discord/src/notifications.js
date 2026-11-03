@@ -345,20 +345,30 @@ export const formatFinalReport = (report, job = null) => {
   };
 };
 
-export const formatSpecificationCard = (submission, { projectSlug = '', filename = '' } = {}) => {
+export const formatSpecificationCard = (submission, { projectSlug = '', filename = '', starterRepo = null, targetRepo = null, repositoryReferences = [] } = {}) => {
   const sizeKb = (submission.prompt_length / 1024).toFixed(1);
   const targetDesc = projectSlug ? `Project: \`${projectSlug}\`` : (submission.session_id ? `Session: \`${submission.session_id.slice(0, 8)}...\`` : 'Standalone Session');
   const sourceDesc = filename ? `File: \`${filename}\`` : (submission.input_method === 'multipart_prompt' ? 'Multipart Prompt' : 'Direct Attachment');
 
-  const content = redactSensitive([
+  const lines = [
     '### 📋 Specification Received',
     `**Input**: ${sourceDesc}`,
     `**Size**: ${submission.prompt_length} bytes (${sizeKb} KB)`,
     `**SHA-256**: \`${submission.prompt_hash}\``,
-    `**Target**: ${targetDesc}`,
-    '',
-    'Click **Execute** to run this specification, or **Cancel** to abort.'
-  ].join('\n'));
+    `**Target**: ${targetDesc}`
+  ];
+
+  if (targetRepo) {
+    lines.push(`**Target Repository**: \`${targetRepo}\``);
+  }
+  if (starterRepo) {
+    lines.push(`**Starter Repository**: \`${starterRepo}\``);
+  }
+
+  lines.push('');
+  lines.push('Click **Execute** to run this specification, or **Cancel** to abort.');
+
+  const content = redactSensitive(lines.join('\n'));
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()

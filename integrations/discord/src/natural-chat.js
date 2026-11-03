@@ -11,6 +11,9 @@ import {
   downloadAndValidateAttachment,
   savePromptArtifact
 } from './attachment-service.js';
+import { ProjectContextResolver } from '../../../src/services/project-context-resolver.js';
+import { classifyRepositoryReferences } from '../../../src/services/repository-classifier.js';
+import { areEquivalentGitUrls } from '../../../src/services/project-service.js';
 
 // Per-session execution serialization queue
 const sessionQueues = new Map();
@@ -62,16 +65,25 @@ export function parseProjectDirective(text) {
 
 export function extractRepositoryDirective(text) {
   if (!text || typeof text !== 'string') return null;
-  const directiveMatch = text.match(/(?:^|\r?\n|\s)(?:(?:git\s+)?remote|repo|repository)\s*[:=]?\s*(\S+)/i);
-  if (directiveMatch) {
-    const val = directiveMatch[1].trim().replace(/[),.]$/, '');
-    if (val.includes('github') || val.includes('.git')) return val;
-  }
-
   const trimmed = text.trim();
-  const isStandaloneUrl = /^(https?:\/\/(?:www\.)?github\.com\/\S+|git@(github\.com|github-coding):\S+)$/i.test(trimmed);
+  const isStandaloneUrl = /^(https?:\/\/(?:www\.)?github\.com\/\S+|git@(github\.com|github-coding):\S+|ssh:\/\/git@(github\.com|github-coding)\/\S+)$/i.test(trimmed);
   if (isStandaloneUrl) {
     return trimmed.replace(/[),.]$/, '');
+  }
+
+  const refs = classifyRepositoryReferences(text);
+  const targetRef = refs.find(r => r.target);
+  if (targetRef) return targetRef.url;
+
+  // Fallback: check for explicit remote directive pattern like "repo: https://..." or "configure git remote git@..."
+  const directiveMatch = text.match(/(?:^|\r?\n|\s)(?:(?:configure\s+)?(?:git\s+)?remote|target\s+repo(?:sitory)?|repo(?:sitory)?)\s*[:=]?\s*(\S+)/i);
+  if (directiveMatch) {
+    const val = directiveMatch[1].trim().replace(/[),.]$/, '');
+    if (val.includes('github') || val.includes('.git')) {
+      const matchedPrefix = text.slice(Math.max(0, directiveMatch.index - 30), directiveMatch.index).toLowerCase();
+      const isReference = /(?:starter|template|framework|fondasi|basis|dependency|library|doc|example|contoh)/i.test(matchedPrefix);
+      if (!isReference) return val;
+    }
   }
 
   return null;
@@ -399,20 +411,8 @@ export async function handleGitConfigurationAndResumption(
 
 export function checkRepositoryMismatch(specRepo, projectRepo) {
   if (!specRepo || !projectRepo) return { mismatch: false };
-  const normSpec = specRepo.trim().toLowerCase().replace(/\.git$/, '').replace(/\/+$/, '');
-  const normProject = projectRepo.trim().toLowerCase().replace(/\.git$/, '').replace(/\/+$/, '');
-  if (normSpec === normProject) return { mismatch: false };
-
-  const checkSpec = normSpec.match(/(?:github\.com[/:])([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)/i);
-  const checkProj = normProject.match(/(?:github\.com[/:])([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)/i);
-
-  if (checkSpec && checkProj) {
-    const match = checkSpec[1].toLowerCase() === checkProj[1].toLowerCase() &&
-                  checkSpec[2].toLowerCase() === checkProj[2].toLowerCase();
-    return { mismatch: !match, specRepo, projectRepo };
-  }
-
-  return { mismatch: normSpec !== normProject, specRepo, projectRepo };
+  const equivalent = areEquivalentGitUrls(specRepo, projectRepo);
+  return { mismatch: !equivalent, specRepo, projectRepo };
 }
 
 export function isChatEligible(message, client) {
@@ -639,12 +639,14 @@ export async function handleMessage(message, client, apiClient, persistence, aut
       targetProjectId = targetProject.id;
     }
 
-    const specRepo = extractRepositoryDirective(fullPrompt);
-    if (targetProject && specRepo && (targetProject.repo_url || targetProject.repository_url)) {
-      const repoCheck = checkRepositoryMismatch(specRepo, targetProject.repo_url || targetProject.repository_url);
-      if (repoCheck.mismatch) {
+    if (targetProject) {
+      const resolvedContext = ProjectContextResolver.resolveProjectContext({
+        project: targetProject,
+        promptText: fullPrompt
+      });
+      if (!resolvedContext.execution.allowed) {
         return await message.reply({
-          content: `❌ **Repository Mismatch**: Specification repository (\`${specRepo}\`) does not match registered project repository (\`${targetProject.repo_url || targetProject.repository_url}\`). Execution blocked to protect workspace integrity.`,
+          content: `❌ **Repository Mismatch**: ${resolvedContext.execution.validation_reason}`,
           allowedMentions: { repliedUser: false, parse: [] }
         });
       }
@@ -693,11 +695,14 @@ export async function handleMessage(message, client, apiClient, persistence, aut
         }
       }
 
-      if (targetProject && specRepo && (targetProject.repo_url || targetProject.repository_url)) {
-        const repoCheck = checkRepositoryMismatch(specRepo, targetProject.repo_url || targetProject.repository_url);
-        if (repoCheck.mismatch) {
+      if (targetProject) {
+        const resolvedContext = ProjectContextResolver.resolveProjectContext({
+          project: targetProject,
+          promptText: fullPrompt
+        });
+        if (!resolvedContext.execution.allowed) {
           return await message.reply({
-            content: `❌ **Repository Mismatch**: Specification repository (\`${specRepo}\`) does not match registered project repository (\`${targetProject.repo_url || targetProject.repository_url}\`). Execution blocked to protect workspace integrity.`,
+            content: `❌ **Repository Mismatch**: ${resolvedContext.execution.validation_reason}`,
             allowedMentions: { repliedUser: false, parse: [] }
           });
         }
@@ -725,9 +730,20 @@ export async function handleMessage(message, client, apiClient, persistence, aut
       }
     });
 
+    const resolvedContext = targetProject
+      ? ProjectContextResolver.resolveProjectContext({
+          project: targetProject,
+          promptText: fullPrompt
+        })
+      : null;
+    const starterRef = resolvedContext?.repository_references?.find(r => r.role === 'STARTER');
+
     const card = formatSpecificationCard(submission, {
       filename: downloaded.filename,
-      projectSlug: targetProject?.slug || ''
+      projectSlug: targetProject?.slug || '',
+      targetRepo: targetProject?.repository_url || targetProject?.repo_url || null,
+      starterRepo: starterRef?.url || null,
+      repositoryReferences: resolvedContext?.repository_references || []
     });
 
     const cardMsg = await message.reply({
@@ -774,13 +790,15 @@ export async function handleMessage(message, client, apiClient, persistence, aut
     targetProjectId = targetProject.id;
   }
 
-  // Repository mismatch check
-  const specRepo = extractRepositoryDirective(rawPrompt);
-  if (targetProject && specRepo && (targetProject.repo_url || targetProject.repository_url)) {
-    const repoCheck = checkRepositoryMismatch(specRepo, targetProject.repo_url || targetProject.repository_url);
-    if (repoCheck.mismatch) {
+  // Repository mismatch and scope conflict validation
+  if (targetProject) {
+    const resolvedContext = ProjectContextResolver.resolveProjectContext({
+      project: targetProject,
+      promptText: rawPrompt
+    });
+    if (!resolvedContext.execution.allowed) {
       return await message.reply({
-        content: `❌ **Repository Mismatch**: Specification repository (\`${specRepo}\`) does not match registered project repository (\`${targetProject.repo_url || targetProject.repository_url}\`). Execution blocked to protect workspace integrity.`,
+        content: `❌ **Repository Mismatch**: ${resolvedContext.execution.validation_reason}`,
         allowedMentions: { repliedUser: false, parse: [] }
       });
     }

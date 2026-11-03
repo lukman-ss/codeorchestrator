@@ -353,7 +353,7 @@ Determine if the job should be marked COMPLETE or PARTIALLY_COMPLETED.`;
           jobId,
           projectId: job.project_id,
           prompt: job.prompt
-        }).catch(err => logger.error({ jobId, err: err.message }, 'Workflow execution error for job'));
+        }).catch(err => logger.error({ component: 'repair_agent', jobId, err, event: 'workflow_error' }, 'Workflow execution error for job'));
       } else {
         const nextStatus = finalVerdict === 'PASS' ? 'completed' : 'partially_completed';
         const workflowStatus = finalVerdict === 'PASS' ? 'completed' : 'failed';
@@ -362,6 +362,7 @@ Determine if the job should be marked COMPLETE or PARTIALLY_COMPLETED.`;
           [nextStatus, nextStatus, workflowStatus, finalVerdict, passedCount, completionPercent, reportJson, jobId]
         );
 
+        logger.info({ component: 'job', event: finalVerdict === 'PASS' ? 'job_completed' : 'job_failed', jobId, finalVerdict, passedCount, completionPercent }, 'Job terminal state reached');
         emitWebSocketEvent(finalVerdict === 'PASS' ? 'job.completed' : 'job.partially_completed', { job_id: jobId }, { completionPercent, finalVerdict, report });
       }
     });

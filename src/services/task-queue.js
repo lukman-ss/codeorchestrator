@@ -16,6 +16,8 @@ import { ModelResolver } from './model-resolver.js';
 import { ModelFailover } from './model-failover.js';
 import { ModelRouter } from './model-router.js';
 import { ModelRegistry } from './model-registry.js';
+import { ProjectContextResolver } from './project-context-resolver.js';
+import { getProject } from './project-service.js';
 
 const emitter = new EventEmitter();
 const processes = new Map();
@@ -66,6 +68,7 @@ export const enqueueTask = (id) => {
   if (!dispatchQueue.includes(id)) {
     dispatchQueue.push(id);
     emitPersisted(id, 'task.queued', { id });
+    logger.info({ component: 'task_queue', event: 'task_queued', taskId: id }, 'Task queued');
   }
   schedule();
   return true;
@@ -108,12 +111,22 @@ const runTask = (task) => {
       args.push('-s', sess.opencode_session_id);
     }
   }
+
+  const project = task.project_id ? getProject(task.project_id) : null;
+  const references = ProjectContextResolver.getPersistedReferences(task.id);
+  const handoffPrompt = project
+    ? ProjectContextResolver.buildProjectContextPrompt({
+        project,
+        promptText: task.prompt,
+        references
+      })
+    : task.prompt;
   
-  const useStdin = Buffer.byteLength(task.prompt || '', 'utf8') > 32768;
-  if (!useStdin && task.prompt) {
-    args.push(task.prompt);
+  const useStdin = Buffer.byteLength(handoffPrompt || '', 'utf8') > 32768;
+  if (!useStdin && handoffPrompt) {
+    args.push(handoffPrompt);
   }
-  logger.info({ taskId: task.id, hasKey: !!API_KEY, targetModel, args }, 'Spawning OpenCode task');
+  logger.info({ component: 'task_queue', event: 'task_spawning', taskId: task.id, hasKey: !!API_KEY, targetModel, args }, 'Spawning OpenCode task');
   
   const workspace = join(WORKSPACE_ROOT, dbGetOne('SELECT slug FROM projects WHERE id=?', [task.project_id]).slug);
   mkdirSync(workspace, { recursive: true });
@@ -126,13 +139,14 @@ const runTask = (task) => {
     shell: false,
     stdio: ['pipe', 'pipe', 'pipe']
   });
-  if (useStdin && task.prompt) {
-    child.stdin.end(task.prompt, 'utf8');
+  if (useStdin && handoffPrompt) {
+    child.stdin.end(handoffPrompt, 'utf8');
   } else {
     child.stdin.end();
   }
   processes.set(task.id, child);
   globalRunning++;
+  logger.info({ component: 'task_queue', event: 'subprocess_spawned', taskId: task.id, pid: child.pid, targetModel }, 'Task subprocess spawned');
   const taskLogger = new TaskLogger(task.id);
   dbRun("UPDATE tasks SET status='running', execution_status='running', workflow_status='running', model=?, pid=?, started_at=datetime('now'), updated_at=datetime('now') WHERE id=?", [targetModel, child.pid, task.id]);
   emitPersisted(task.id, 'task.routing', {
@@ -192,16 +206,19 @@ const runTask = (task) => {
     emitPersisted(task.id, 'task.log', { stream: 'stderr', data: chunk.toString() });
   });
   child.on('error', (err) => {
+    logger.error({ component: 'task_queue', event: 'subprocess_spawn_failed', taskId: task.id, pid: child.pid, err }, 'Task subprocess failed to spawn');
     taskLogger.end();
-    finish(task, 'failed', err.message, child.pid, null);
+    finish(task, 'failed', err.message, child.pid, null, null);
   });
-  child.on('exit', (code) => {
+  child.on('exit', (code, signal) => {
+    logger.info({ component: 'task_queue', event: 'subprocess_exited', taskId: task.id, pid: child.pid, exitCode: code, signal }, 'Task subprocess exited');
     taskLogger.end();
-    finish(task, code === 0 ? 'completed' : 'failed', code !== 0 ? `Exit code ${code}` : null, child.pid, code);
+    const errText = signal ? `Terminated by signal ${signal}` : (code !== 0 ? `Exit code ${code}` : null);
+    finish(task, (code === 0 && !signal) ? 'completed' : 'failed', errText, child.pid, code, signal);
   });
 };
 
-const finish = (task, status, error, pid, code) => {
+const finish = (task, status, error, pid, code, signal = null) => {
   const id = typeof task === 'object' && task ? task.id : task;
   const taskObj = typeof task === 'object' && task ? task : dbGetOne('SELECT * FROM tasks WHERE id = ?', [id]);
   processes.delete(id);
@@ -243,7 +260,16 @@ const finish = (task, status, error, pid, code) => {
 
   dbRun("UPDATE tasks SET status=?, execution_status=?, workflow_status=?, error=?, exit_code=?, finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?",
     [taskStatus, status, workflowStatus, error, code, id]);
-  emitPersisted(id, isCompleted ? (taskObj?.project_id ? 'task.execution_finished' : 'task.completed') : 'task.failed', { exitCode: code, error });
+  emitPersisted(id, isCompleted ? (taskObj?.project_id ? 'task.execution_finished' : 'task.completed') : 'task.failed', { exitCode: code, signal, error });
+  logger.info({
+    component: 'task_queue',
+    event: isCompleted ? 'task_completed' : 'task_failed',
+    taskId: id,
+    status: taskStatus,
+    exitCode: code,
+    signal,
+    error
+  }, `Task finished with status: ${taskStatus}`);
 
   if (isCompleted && taskObj?.project_id) {
     WorkflowService.startCompletionWorkflow({
@@ -251,7 +277,7 @@ const finish = (task, status, error, pid, code) => {
       projectId: taskObj.project_id,
       prompt: taskObj.prompt,
       baseline
-    }).catch(err => logger.error({ taskId: id, err: err.message }, 'Workflow execution error'));
+    }).catch(err => logger.error({ component: 'task_queue', taskId: id, err, event: 'workflow_start_error' }, 'Workflow execution error'));
   }
 
   schedule();
@@ -279,28 +305,38 @@ export const cancelTask = async (id) => {
   }
   dbRun("UPDATE tasks SET status='cancelled', finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?", [id]);
   emitPersisted(id, 'task.cancelled');
+  logger.info({ component: 'task_queue', event: 'task_cancelled', taskId: id }, 'Task cancelled');
   schedule();
 };
 
-export const shutdownAll = () => {
-  const graceMs = (Number(process.env.TASK_KILL_GRACE_SECONDS) || 10) * 1000;
+export const shutdownAll = async (timeoutMs = (Number(process.env.TASK_KILL_GRACE_SECONDS) || 10) * 1000) => {
+  const count = processes.size;
+  if (count === 0) return;
+  logger.info({ component: 'task_queue', event: 'shutdown_tasks_start', count, timeoutMs }, 'Stopping active task processes');
+
   for (const [id, child] of processes) {
     try { child.kill('SIGTERM'); } catch {}
   }
-  setTimeout(() => {
+
+  const start = Date.now();
+  while (processes.size > 0 && (Date.now() - start < timeoutMs)) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  if (processes.size > 0) {
+    logger.warn({ component: 'task_queue', event: 'shutdown_tasks_force_kill', remaining: processes.size }, 'Force killing remaining task processes with SIGKILL');
     for (const [id, child] of processes) {
       try {
         if (!child.killed) child.kill('SIGKILL');
       } catch {}
-      if (processes.has(id)) {
-        processes.delete(id);
-        try {
-          dbRun("UPDATE tasks SET status='interrupted', error='orchestrator shutdown', finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?", [id]);
-          emitPersisted(id, 'task.interrupted', { reason: 'orchestrator shutdown' });
-        } catch {}
-      }
+      processes.delete(id);
+      try {
+        dbRun("UPDATE tasks SET status='interrupted', execution_status='interrupted', workflow_status='interrupted', error='orchestrator shutdown', finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?", [id]);
+        emitPersisted(id, 'task.interrupted', { reason: 'orchestrator shutdown' });
+      } catch {}
     }
-  }, graceMs);
+  }
+  logger.info({ component: 'task_queue', event: 'shutdown_tasks_complete' }, 'Task processes shut down');
 };
 
 export const recoverRunning = () => {
@@ -318,6 +354,7 @@ export const recoverRunning = () => {
     }
     dbRun("UPDATE tasks SET status='interrupted', execution_status='interrupted', workflow_status='interrupted', error='server restarted', finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?", [row.id]);
     emitPersisted(row.id, 'task.interrupted', { reason: 'server restarted' });
+    logger.warn({ component: 'task_queue', event: 'task_recovered_interrupted', taskId: row.id, pid: row.pid }, 'Recovered interrupted task from previous run');
   }
 };
 

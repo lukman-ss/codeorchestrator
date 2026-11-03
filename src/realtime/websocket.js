@@ -21,6 +21,7 @@ export const setupWebSocket = (server) => {
   });
 
   const clientMap = new Map(); // ws -> { taskId, jobId, subscribeAll, listener, busListener, pingInterval }
+  wss.clientMap = clientMap;
 
   wss.on('connection', (ws, req) => {
     let taskId = null;
@@ -168,46 +169,66 @@ export const setupWebSocket = (server) => {
   return wss;
 };
 
-export const shutdownWebSocket = (wss, timeoutMs = 5000) => {
-  logger.info({ event: 'ws_shutdown', timeoutMs }, 'Shutting down WebSocket server');
-  const closed = new Set();
-  const remaining = new Set();
-  const deadline = Date.now() + timeoutMs;
+export const shutdownWebSocket = async (wss, timeoutMs = 2000) => {
+  if (!wss) return;
+  const clientCount = wss.clients ? wss.clients.size : 0;
+  logger.info({ component: 'websocket', event: 'ws_shutdown_started', clients: clientCount, timeoutMs }, 'Shutting down WebSocket server');
 
-  for (const [ws, { taskId, listener, pingInterval }] of wss.clients) {
-    clearInterval(pingInterval);
-    if (listener && taskId) {
-      offEvent(taskId, listener);
+  const clientMap = wss.clientMap;
+  if (clientMap) {
+    for (const [ws, info] of clientMap) {
+      if (info?.pingInterval) clearInterval(info.pingInterval);
+      if (info?.listener && info?.taskId) offEvent(info.taskId, info.listener);
+      if (info?.busListener) eventBus.off('*', info.busListener);
+    }
+  }
+
+  if (wss.clients) {
+    for (const ws of wss.clients) {
       try {
-        ws.send(JSON.stringify({
-          type: 'orchestrator.shutting_down',
-          timestamp: new Date().toISOString()
-        }));
+        if (ws.readyState === 1 /* OPEN */) {
+          ws.send(JSON.stringify({
+            type: 'orchestrator.shutting_down',
+            timestamp: new Date().toISOString()
+          }));
+          ws.close(1001, 'Server shutting down');
+        }
       } catch {}
     }
   }
 
-  return new Promise((resolve) => {
+  await new Promise((resolve) => {
     const timer = setTimeout(() => {
-      logger.info({ event: 'ws_shutdown_timeout', remaining: wss.clients.size }, 'WebSocket shutdown timeout reached');
+      if (wss.clients) {
+        for (const ws of wss.clients) {
+          try { ws.terminate(); } catch {}
+        }
+      }
+      logger.warn({ component: 'websocket', event: 'ws_shutdown_timeout', remaining: wss.clients ? wss.clients.size : 0 }, 'WebSocket shutdown timeout, terminating remaining clients');
       resolve();
-    }, timeoutMs);
+    }, Math.min(timeoutMs, 1000));
 
     wss.close((err) => {
       clearTimeout(timer);
-      if (err) logger.error({ err, event: 'ws_close_error' }, 'WebSocket close error');
+      if (err) logger.error({ component: 'websocket', event: 'ws_close_error', err }, 'WebSocket close error');
       resolve();
     });
   });
+
+  if (clientMap) clientMap.clear();
+  logger.info({ component: 'websocket', event: 'ws_shutdown_complete' }, 'WebSocket server closed');
 };
 
 export const getWebSocketStats = (wss) => {
   if (!wss) return { clients: 0, subscriptions: new Set() };
-  let subscriptions = new Set();
-  for (const [ws, { taskId }] of wss.clients) {
-    if (taskId) subscriptions.add(taskId);
+  const subscriptions = new Set();
+  const clientMap = wss.clientMap;
+  if (clientMap) {
+    for (const [ws, info] of clientMap) {
+      if (info?.taskId) subscriptions.add(info.taskId);
+    }
   }
-  return { clients: wss.clients.size, subscriptions };
+  return { clients: wss.clients ? wss.clients.size : 0, subscriptions };
 };
 
 export default { setupWebSocket, shutdownWebSocket, getWebSocketStats };

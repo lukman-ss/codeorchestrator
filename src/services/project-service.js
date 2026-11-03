@@ -84,6 +84,27 @@ export const validateGitHubUrl = (url, { allowLocal = false } = {}) => {
   };
 };
 
+export const normalizeGitUrl = (url, options = {}) => {
+  const check = validateGitHubUrl(url, options);
+  if (!check.valid) return check;
+  const canonical = check.host === 'local'
+    ? `local/${check.owner.toLowerCase()}/${check.repo.toLowerCase()}`
+    : `github.com/${check.owner.toLowerCase()}/${check.repo.toLowerCase()}`;
+  return {
+    ...check,
+    canonical,
+    canonicalIdentity: canonical
+  };
+};
+
+export const areEquivalentGitUrls = (urlA, urlB, options = {}) => {
+  if (!urlA || !urlB) return false;
+  const normA = normalizeGitUrl(urlA, options);
+  const normB = normalizeGitUrl(urlB, options);
+  if (!normA.valid || !normB.valid) return false;
+  return normA.canonical === normB.canonical;
+};
+
 export const validateGitBranch = (branch) => {
   if (!branch) return { valid: true };
   const trimmed = branch.trim();
@@ -539,26 +560,14 @@ export const validateProjectWorkspace = (project, options = {}) => {
   // Explicit expected target repository check
   const expectedRepo = options.expectedRepoUrl || project.metadata?.expectedRepoUrl;
   if (expectedRepo && actualRemote) {
-    const normActual = actualRemote.trim().toLowerCase().replace(/\.git$/, '').replace(/\/+$/, '');
-    const normExpected = expectedRepo.trim().toLowerCase().replace(/\.git$/, '').replace(/\/+$/, '');
-    if (normActual !== normExpected) {
-      const checkA = validateGitHubUrl(actualRemote);
-      const checkE = validateGitHubUrl(expectedRepo);
-      const matchOwnerRepo =
-        checkA.valid &&
-        checkE.valid &&
-        checkA.owner?.toLowerCase() === checkE.owner?.toLowerCase() &&
-        checkA.repo?.toLowerCase() === checkE.repo?.toLowerCase();
-
-      if (!matchOwnerRepo) {
-        return {
-          valid: false,
-          mismatch: true,
-          error: `Repository mismatch detected: Workspace remote '${actualRemote}' does not match expected repository '${expectedRepo}'.`,
-          actualRemote,
-          expectedRemote: expectedRepo
-        };
-      }
+    if (!areEquivalentGitUrls(actualRemote, expectedRepo)) {
+      return {
+        valid: false,
+        mismatch: true,
+        error: `Repository mismatch detected: Workspace remote '${actualRemote}' does not match expected repository '${expectedRepo}'.`,
+        actualRemote,
+        expectedRemote: expectedRepo
+      };
     }
   }
 

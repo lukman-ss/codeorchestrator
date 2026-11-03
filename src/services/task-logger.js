@@ -1,6 +1,6 @@
 import { createWriteStream, statSync, unlinkSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { TASK_LOG_MAX_SIZE, TASK_LOG_RETENTION_DAYS } from '../config.js';
+import { TASK_LOG_MAX_SIZE, TASK_LOG_RETENTION_DAYS, ORCHESTRATOR_ROOT } from '../config.js';
 import logger from '../logger.js';
 
 const parseSize = (sz) => {
@@ -17,11 +17,12 @@ const parseSize = (sz) => {
 
 const MAX_BYTES = parseSize(TASK_LOG_MAX_SIZE);
 const TAIL_BUFFER_SIZE = 8192; // 8KB preserved for terminal diagnostics
+const TASKS_DIR = join(ORCHESTRATOR_ROOT, 'logs', 'tasks');
 
 export class TaskLogger {
   constructor(taskId) {
     this.taskId = taskId;
-    this.path = join('./logs/tasks', `${taskId}.log`);
+    this.path = join(TASKS_DIR, `${taskId}.log`);
     this.stream = createWriteStream(this.path, { flags: 'a' });
     this.bytesWritten = 0;
     this.truncated = false;
@@ -67,7 +68,7 @@ export class TaskLogger {
 }
 
 export const cleanupTaskLogs = () => {
-  const dir = './logs/tasks';
+  const dir = TASKS_DIR;
   const now = Date.now();
   const maxAgeMs = TASK_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   try {

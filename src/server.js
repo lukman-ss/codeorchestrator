@@ -2,8 +2,10 @@ import Fastify from 'fastify';
 import { PORT, HOST, API_AUTH_TOKEN, DATABASE_PATH, DISK_FREE_THRESHOLD_MB, REQUIRE_AUTH } from './config.js';
 import { init as initDb, close as closeDb } from './database/db.js';
 import { recoverOperations } from './services/project-operations.js';
-import { recoverSessions } from './services/session-service.js';
+import { recoverSessions, shutdownAllSessions } from './services/session-service.js';
 import { recoverRunning, startFromQueue, getGlobalRunning, getDiskStats, shutdownAll, checkDiskSpace, getDispatchQueue, blockDispatch } from './services/task-queue.js';
+import { recoverJobs } from './services/job-service.js';
+import { shutdownAllAgents } from './services/agent-execution-engine.js';
 import { cleanupTaskLogs } from './services/task-logger.js';
 import { scheduleCleanup } from './services/maintenance.js';
 import projects from './routes/projects.js';
@@ -16,7 +18,7 @@ import { setupWebSocket, shutdownWebSocket } from './realtime/websocket.js';
 import { registerJobRoutes } from './routes/job-routes.js';
 import { WorkflowService } from './services/workflow-service.js';
 import { ModelRouter } from './services/model-router.js';
-import logger from './logger.js';
+import logger, { flushLogger } from './logger.js';
 
 if (REQUIRE_AUTH && !API_AUTH_TOKEN) {
   logger.fatal({ event: 'missing_auth_token' }, 'ORCHESTRATOR_API_TOKEN must be set when REQUIRE_AUTH is true');
@@ -78,31 +80,56 @@ ModelRouter.initDefaultPolicies();
 recoverOperations();
 recoverSessions();
 recoverRunning();
+recoverJobs();
 WorkflowService.recoverPendingWorkflows();
 scheduleCleanup();
-setInterval(cleanupTaskLogs, 24 * 3600 * 1000);
+setInterval(cleanupTaskLogs, 24 * 3600 * 1000).unref();
 startFromQueue();
 
 fastify.listen({ port: PORT, host: HOST }).then(() => {
-  logger.info({ event: 'server_started', port: PORT, host: HOST, db: DATABASE_PATH }, 'Server ready');
+  logger.info({ event: 'server_started', port: PORT, host: HOST, db: DATABASE_PATH, pid: process.pid }, 'Server ready');
 });
 
+let isShuttingDown = false;
 const gracefulShutdown = async (signal) => {
-  logger.info({ event: 'shutdown_signal_received', signal }, 'Shutting down gracefully');
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  logger.info({ event: 'shutdown_signal_received', signal, pid: process.pid }, 'Shutting down gracefully');
   blockDispatch();
+
+  try {
+    await shutdownWebSocket(wss);
+  } catch (err) {
+    logger.error({ err, event: 'shutdown_ws_error' }, 'WS shutdown error');
+  }
+
   try {
     await fastify.close();
     logger.info({ event: 'http_closed' }, 'HTTP server closed');
   } catch (err) {
     logger.error({ err, event: 'shutdown_http_error' }, 'Error closing HTTP server');
   }
-  try { shutdownAll(); } catch (e) { logger.error({ e, event: 'shutdown_tasks_error' }, 'Error shutting down tasks'); }
-  const graceMs = (Number(process.env.TASK_KILL_GRACE_SECONDS) || 10) * 1000 + 500;
-  logger.info({ graceMs, event: 'shutdown_grace_wait' }, 'Waiting for graceful shutdown grace period');
-  await new Promise(resolve => setTimeout(resolve, graceMs));
-  try { await shutdownWebSocket(wss); } catch (e) { logger.error({ e, event: 'shutdown_ws_error' }, 'WS shutdown error'); }
-  try { closeDb(); logger.info({ event: 'db_closed' }, 'SQLite closed'); } catch (e) { logger.error({ e, event: 'db_close_error' }, 'DB close error'); }
+
+  try {
+    await Promise.allSettled([
+      shutdownAll(),
+      shutdownAllAgents(),
+      shutdownAllSessions()
+    ]);
+    logger.info({ event: 'subprocesses_closed' }, 'All subprocesses stopped');
+  } catch (err) {
+    logger.error({ err, event: 'shutdown_processes_error' }, 'Error shutting down processes');
+  }
+
+  try {
+    closeDb();
+    logger.info({ event: 'db_closed' }, 'SQLite closed');
+  } catch (err) {
+    logger.error({ err, event: 'db_close_error' }, 'DB close error');
+  }
+
   logger.info({ event: 'shutdown_complete' }, 'Shutdown complete');
+  await flushLogger();
   process.exit(0);
 };
 

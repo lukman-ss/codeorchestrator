@@ -481,7 +481,24 @@ export const migrations = [
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(model_id, category)
   )`,
-  `CREATE INDEX IF NOT EXISTS idx_perf_history_model ON model_performance_history(model_id, category)`
+  `CREATE INDEX IF NOT EXISTS idx_perf_history_model ON model_performance_history(model_id, category)`,
+
+  `CREATE TABLE IF NOT EXISTS repository_references (
+    id TEXT PRIMARY KEY,
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    reference_url TEXT NOT NULL,
+    canonical_repository TEXT NOT NULL,
+    reference_role TEXT NOT NULL,
+    classification_source TEXT NOT NULL,
+    is_target INTEGER NOT NULL DEFAULT 0,
+    validation_result TEXT NOT NULL,
+    validation_reason TEXT,
+    metadata_json TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_repo_refs_task ON repository_references(task_id);
+  CREATE INDEX IF NOT EXISTS idx_repo_refs_project ON repository_references(project_id);`
 ];
 
-export const currentSchemaVersion = 7;
+export const currentSchemaVersion = 8;

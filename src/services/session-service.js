@@ -11,6 +11,7 @@ import { ModelResolver } from './model-resolver.js';
 import { ModelRouter } from './model-router.js';
 import { ModelRegistry } from './model-registry.js';
 import { ModelFailover } from './model-failover.js';
+import { ProjectContextResolver } from './project-context-resolver.js';
 import {
   OPENCODE_BIN,
   NINEROUTER_API_KEY,
@@ -22,9 +23,11 @@ import logger from '../logger.js';
 
 // Mutex / Queue per session to prevent concurrent writes from corrupting OpenCode session context
 const sessionLocks = new Map();
+export const activeSessions = new Map();
 
 export const recoverSessions = () => {
   dbRun("UPDATE sessions SET status = 'idle', updated_at = datetime('now') WHERE status = 'active'");
+  logger.info({ component: 'session_service', event: 'sessions_recovered' }, 'Recovered active sessions to idle on startup');
 };
 
 async function withSessionLock(sessionId, fn) {
@@ -283,10 +286,28 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
       args.push('-s', session.opencode_session_id);
     }
 
+    let handoffPrompt = prompt;
+    if (session.project_id && session.session_type !== 'standalone') {
+      const project = getProject(session.project_id);
+      const res = ProjectContextResolver.resolveProjectContext({
+        project,
+        promptText: prompt,
+        sessionId: session.id
+      });
+      if (!res.execution.allowed) {
+        throw new Error(res.execution.validation_reason);
+      }
+      handoffPrompt = ProjectContextResolver.buildProjectContextPrompt({
+        project,
+        promptText: prompt,
+        references: res.repository_references
+      });
+    }
+
     // Pass via stdin when prompt length exceeds CLI argument threshold to prevent E2BIG
-    const useStdin = Buffer.byteLength(prompt, 'utf8') > 32768;
+    const useStdin = Buffer.byteLength(handoffPrompt, 'utf8') > 32768;
     if (!useStdin) {
-      args.push(prompt);
+      args.push(handoffPrompt);
     }
 
     logger.info({ sessionId: session.id, model: targetModel, workingDir, hasSessionId: !!session.opencode_session_id }, 'Spawning OpenCode session message execution');
@@ -314,12 +335,16 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
           shell: false,
           stdio: ['pipe', 'pipe', 'pipe']
         });
+        activeSessions.set(session.id, child);
+        logger.info({ component: 'session_service', event: 'subprocess_spawned', sessionId: session.id, pid: child.pid, targetModel }, 'Session subprocess spawned');
         if (useStdin) {
-          child.stdin.end(prompt, 'utf8');
+          child.stdin.end(handoffPrompt, 'utf8');
         } else {
           child.stdin.end();
         }
       } catch (err) {
+        activeSessions.delete(session.id);
+        logger.error({ component: 'session_service', event: 'subprocess_spawn_failed', sessionId: session.id, err }, 'Session subprocess spawn failed');
         dbRun("UPDATE sessions SET status = 'interrupted', updated_at = datetime('now') WHERE id = ?", [session.id]);
         return reject(err);
       }
@@ -368,18 +393,22 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
 
       child.on('error', (err) => {
         clearTimeout(timer);
+        activeSessions.delete(session.id);
+        logger.error({ component: 'session_service', event: 'subprocess_error', sessionId: session.id, err }, 'Session subprocess error');
         dbRun("UPDATE sessions SET status = 'interrupted', updated_at = datetime('now') WHERE id = ?", [session.id]);
         emitWebSocketEvent('session.failed', null, { sessionId: session.id, error: err.message });
         reject(err);
       });
 
-      child.on('exit', (code) => {
+      child.on('exit', (code, signal) => {
         clearTimeout(timer);
+        activeSessions.delete(session.id);
+        logger.info({ component: 'session_service', event: 'subprocess_exited', sessionId: session.id, exitCode: code, signal }, 'Session subprocess exited');
         if (stdoutBuffer) {
           processJsonLine(stdoutBuffer);
           stdoutBuffer = '';
         }
-        if (code === 0) {
+        if (code === 0 && !signal) {
           try {
             ModelRegistry.recordExecutionSuccess(targetModel);
             ModelRouter.recordOutcome({ modelId: targetModel, category: 'general_conversation', verified: true });
@@ -426,11 +455,40 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
             ModelRouter.recordOutcome({ modelId: targetModel, category: 'general_conversation', verified: false });
           } catch {}
           dbRun("UPDATE sessions SET status = 'interrupted', updated_at = datetime('now') WHERE id = ?", [session.id]);
-          const errMsg = `OpenCode execution failed with exit code ${code}: ${stderrText || stdoutText}`;
+          const errMsg = signal
+            ? `OpenCode terminated by signal ${signal}`
+            : `OpenCode execution failed with exit code ${code}: ${stderrText || stdoutText}`;
           emitWebSocketEvent('session.failed', null, { sessionId: session.id, error: errMsg });
           reject(new Error(errMsg));
         }
       });
     });
   });
+};
+
+export const shutdownAllSessions = async (timeoutMs = 3000) => {
+  const count = activeSessions.size;
+  if (count === 0) return;
+  logger.info({ component: 'session_service', event: 'shutdown_sessions_start', count, timeoutMs }, 'Stopping active session subprocesses');
+
+  for (const [id, child] of activeSessions) {
+    try { child.kill('SIGTERM'); } catch {}
+  }
+
+  const start = Date.now();
+  while (activeSessions.size > 0 && Date.now() - start < timeoutMs) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  if (activeSessions.size > 0) {
+    logger.warn({ component: 'session_service', event: 'shutdown_sessions_force_kill', remaining: activeSessions.size }, 'Force killing remaining session processes');
+    for (const [id, child] of activeSessions) {
+      try { if (!child.killed) child.kill('SIGKILL'); } catch {}
+      activeSessions.delete(id);
+      try {
+        dbRun("UPDATE sessions SET status = 'interrupted', updated_at = datetime('now') WHERE id = ?", [id]);
+      } catch {}
+    }
+  }
+  logger.info({ component: 'session_service', event: 'shutdown_sessions_complete' }, 'Session processes shut down');
 };

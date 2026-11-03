@@ -5,6 +5,7 @@ import { getSession } from './session-service.js';
 import { GitOperations } from './git-operations.js';
 import { WorkflowService } from './workflow-service.js';
 import { TaskContextService } from './task-context-service.js';
+import { ProjectContextResolver } from './project-context-resolver.js';
 
 export const listTasks = (projectId) => {
   const rows = dbGet('SELECT * FROM tasks WHERE project_id = ? ORDER BY created_at DESC', [projectId]);
@@ -52,6 +53,16 @@ export const createTask = (projectId, { prompt, model, sessionId }) => {
   const wsCheck = validateProjectWorkspace(project);
   if (!wsCheck.valid) {
     throw new Error(wsCheck.error);
+  }
+  const allowLocal = Boolean(project.is_test) || process.env.NODE_ENV === 'test';
+  const resolvedContext = ProjectContextResolver.resolveProjectContext({
+    project,
+    promptText: prompt,
+    sessionId,
+    allowLocal
+  });
+  if (!resolvedContext.execution.allowed) {
+    throw new Error(resolvedContext.execution.validation_reason);
   }
   const session = createSession(projectId, { sessionId, model });
   const id = randomUUID();
@@ -163,6 +174,105 @@ export const recoverBlockedTask = async (taskId, options = {}) => {
     workflow_status: refreshedTask.workflow_status,
     project: getProject(project.id),
     task: refreshedTask,
+    workflowResult
+  };
+};
+
+export const recoverRepositoryMismatchTask = async (taskId, options = {}) => {
+  const task = getTask(taskId);
+  if (!task) {
+    throw new Error(`Task ${taskId} not found`);
+  }
+
+  const project = getProject(task.project_id);
+  const resolvedContext = ProjectContextResolver.resolveProjectContext({
+    project,
+    promptText: task.prompt,
+    sessionId: task.session_id,
+    overrides: options
+  });
+
+  if (!resolvedContext.execution.allowed) {
+    throw new Error(`Cannot recover task: ${resolvedContext.execution.validation_reason}`);
+  }
+
+  // Persist resolved repository references
+  if (resolvedContext.repository_references?.length > 0) {
+    ProjectContextResolver.persistRepositoryReferences(
+      taskId,
+      project.id,
+      resolvedContext.repository_references,
+      resolvedContext.execution.validation_result,
+      resolvedContext.execution.validation_reason
+    );
+  }
+
+  // Update snapshot with resolved references and target
+  TaskContextService.captureSnapshot(taskId, {
+    recoveryAttempts: (TaskContextService.getSnapshot(taskId)?.recovery_attempts || 0) + 1,
+    latestExecutionId: task.id,
+    expectedTargetRepository: project.repository_url || project.repo_url || null,
+    starterRepository: resolvedContext.repository_references.find(r => r.role === 'STARTER')?.url || null
+  });
+
+  // Check if task already has a pending approval (Gate 3 human review)
+  const pendingApproval = dbGetOne(
+    "SELECT * FROM git_approval_requests WHERE task_id = ? AND status = 'pending'",
+    [taskId]
+  );
+
+  let workflowResult = null;
+
+  if (pendingApproval) {
+    // Already verified and awaiting Gate 3 approval: preserve approval, do NOT re-execute or duplicate!
+    dbRun(
+      "UPDATE tasks SET workflow_status = 'awaiting_approval', status = 'running', error = null, updated_at = datetime('now') WHERE id = ?",
+      [taskId]
+    );
+    workflowResult = {
+      action: 'preserved_pending_approval',
+      approvalId: pendingApproval.id,
+      status: 'awaiting_approval'
+    };
+  } else if (task.execution_status === 'completed' || task.exit_code === 0) {
+    // Execution completed but blocked before/during verification: resume completion workflow without re-running OpenCode
+    dbRun(
+      "UPDATE tasks SET workflow_status = 'verifying', status = 'running', error = null, updated_at = datetime('now') WHERE id = ?",
+      [taskId]
+    );
+    workflowResult = await WorkflowService.startCompletionWorkflow({
+      taskId: task.id,
+      projectId: project.id,
+      prompt: task.prompt
+    });
+  } else {
+    // If not executed yet or queued
+    dbRun(
+      "UPDATE tasks SET workflow_status = 'queued', status = 'queued', error = null, updated_at = datetime('now') WHERE id = ?",
+      [taskId]
+    );
+    workflowResult = {
+      action: 'requeued',
+      status: 'queued'
+    };
+  }
+
+  const refreshedTask = getTask(taskId);
+  TaskContextService.updateSnapshot(taskId, {
+    task_status: refreshedTask.status,
+    workflow_status: refreshedTask.workflow_status,
+    blocker_code: refreshedTask.workflow_status === 'blocked' ? 'WORKFLOW_BLOCKED' : null,
+    blocker_details: refreshedTask.error || null
+  });
+
+  return {
+    taskId,
+    recovered: true,
+    status: refreshedTask.status,
+    workflow_status: refreshedTask.workflow_status,
+    project: getProject(project.id),
+    task: refreshedTask,
+    resolvedContext,
     workflowResult
   };
 };

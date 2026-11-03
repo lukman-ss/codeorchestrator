@@ -98,6 +98,7 @@ export class AgentExecutionEngine {
 
     dbRun("UPDATE job_subtasks SET process_pid = ?, process_identity = ?, workspace_path = ?, worktree_branch = ?, started_at = datetime('now') WHERE id = ?",
       [child.pid, `pid:${child.pid}:${executionId}`, workspacePath, branchName, subtask.id]);
+    logger.info({ component: 'agent_engine', event: 'agent_worker_spawned', executionId, jobId: subtask.job_id, subtaskId: subtask.id, role: 'worker', pid: child.pid, model: targetModel }, 'Agent worker subprocess spawned');
 
     const taskLogger = new TaskLogger(`agent-${executionId}`);
     let capturedSession = false;
@@ -126,10 +127,11 @@ export class AgentExecutionEngine {
       taskLogger.write(chunk);
     });
 
-    const finishWorker = async (exitCode) => {
+    const finishWorker = async (exitCode, signal = null) => {
       taskLogger.end();
-      const status = exitCode === 0 ? 'implementation_done' : 'audit_failed';
-      const error = exitCode !== 0 ? `OpenCode exited with code ${exitCode}` : null;
+      const isSuccess = exitCode === 0 && !signal;
+      const status = isSuccess ? 'implementation_done' : 'audit_failed';
+      const error = signal ? `Terminated by signal ${signal}` : (exitCode !== 0 ? `OpenCode exited with code ${exitCode}` : null);
 
       ParallelScheduler.releaseSlot('worker');
       activeExecutions.delete(executionId);
@@ -142,7 +144,8 @@ export class AgentExecutionEngine {
       ParallelScheduler.updateState(subtask.id, status, status === 'audit_failed' ? 'worker exited non-zero' : 'implementation complete', 'worker');
 
       emitWebSocketEvent(status === 'implementation_done' ? 'agent.completed' : 'agent.failed', subtask,
-        { executionId, exitCode, sourceRevision });
+        { executionId, exitCode, signal, sourceRevision });
+      logger.info({ component: 'agent_engine', event: isSuccess ? 'agent_worker_completed' : 'agent_worker_failed', executionId, jobId: subtask.job_id, subtaskId: subtask.id, exitCode, signal, error }, 'Agent worker exited');
 
       if (status === 'implementation_done') {
         const subtaskRow = dbGetOne('SELECT * FROM job_subtasks WHERE id = ?', [subtask.id]);
@@ -153,8 +156,9 @@ export class AgentExecutionEngine {
       }
     };
 
-    child.on('exit', (code) => finishWorker(code));
+    child.on('exit', (code, signal) => finishWorker(code, signal));
     child.on('error', (err) => {
+      logger.error({ component: 'agent_engine', event: 'agent_spawn_error', executionId, jobId: subtask.job_id, subtaskId: subtask.id, err }, 'Failed to spawn worker subprocess');
       taskLogger.end();
       ParallelScheduler.releaseSlot('worker');
       activeExecutions.delete(executionId);
@@ -232,6 +236,7 @@ Do NOT fabricate evidence. Execute relevant verification commands.` +
 
     dbRun('UPDATE agent_executions SET process_pid = ?, process_identity = ? WHERE id = ?',
       [child.pid, `pid:${child.pid}:${executionId}`, executionId]);
+    logger.info({ component: 'agent_engine', event: 'agent_auditor_spawned', executionId, jobId: subtask.job_id, subtaskId: subtask.id, role: isRepair ? 'repair' : 'auditor', pid: child.pid, model: auditModel }, 'Agent auditor subprocess spawned');
 
     const taskLogger = new TaskLogger(`audit-${auditId}`);
     const outputChunks = [];
@@ -245,7 +250,7 @@ Do NOT fabricate evidence. Execute relevant verification commands.` +
       outputChunks.push(chunk.toString());
     });
 
-    const finishAudit = async (exitCode) => {
+    const finishAudit = async (exitCode, signal = null) => {
       taskLogger.end();
       const output = outputChunks.join('');
       let verdict = 'BLOCKED';
@@ -275,7 +280,8 @@ Do NOT fabricate evidence. Execute relevant verification commands.` +
         [verdict, JSON.stringify(evidence.criteria || []), JSON.stringify(evidence.tests || []), JSON.stringify(evidence), JSON.stringify(evidence.findings || []), evidence.summary || '', executionId, auditId]
       );
 
-      emitWebSocketEvent(verdict === 'PASS' ? 'audit.passed' : 'audit.failed', subtask, { executionId, verdict, auditId });
+      emitWebSocketEvent(verdict === 'PASS' ? 'audit.passed' : 'audit.failed', subtask, { executionId, verdict, auditId, exitCode, signal });
+      logger.info({ component: 'agent_engine', event: 'agent_auditor_finished', executionId, jobId: subtask.job_id, subtaskId: subtask.id, verdict, exitCode, signal }, 'Agent audit completed');
 
       if (verdict === 'PASS') {
         ParallelScheduler.updateState(subtask.id, 'integration_pending', 'audit passed', 'auditor');
@@ -288,8 +294,9 @@ Do NOT fabricate evidence. Execute relevant verification commands.` +
       }
     };
 
-    child.on('exit', (code) => finishAudit(code));
+    child.on('exit', (code, signal) => finishAudit(code, signal));
     child.on('error', (err) => {
+      logger.error({ component: 'agent_engine', event: 'agent_auditor_spawn_error', executionId, jobId: subtask.job_id, err }, 'Agent auditor spawn failed');
       taskLogger.end();
       ParallelScheduler.releaseSlot(isRepair ? 'repair' : 'auditor');
       activeExecutions.delete(executionId);
@@ -300,3 +307,43 @@ Do NOT fabricate evidence. Execute relevant verification commands.` +
     return executionId;
   }
 }
+
+export const shutdownAllAgents = async (timeoutMs = 5000) => {
+  const count = activeExecutions.size;
+  if (count === 0) return;
+  logger.info({ component: 'agent_engine', event: 'shutdown_agents_start', count, timeoutMs }, 'Stopping active agent subprocesses');
+
+  for (const [id, exec] of activeExecutions) {
+    if (exec.process && !exec.process.killed) {
+      try { exec.process.kill('SIGTERM'); } catch {}
+    }
+  }
+
+  const start = Date.now();
+  while (activeExecutions.size > 0 && Date.now() - start < timeoutMs) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  if (activeExecutions.size > 0) {
+    logger.warn({ component: 'agent_engine', event: 'shutdown_agents_force_kill', remaining: activeExecutions.size }, 'Force killing remaining agent processes');
+    for (const [id, exec] of activeExecutions) {
+      if (exec.process && !exec.process.killed) {
+        try { exec.process.kill('SIGKILL'); } catch {}
+      }
+      if (exec.role) {
+        try { ParallelScheduler.releaseSlot(exec.role); } catch {}
+      }
+      activeExecutions.delete(id);
+      try {
+        dbRun("UPDATE agent_executions SET status='interrupted', error='orchestrator shutdown', finished_at=datetime('now') WHERE id=?", [id]);
+        if (exec.subtaskId) {
+          dbRun("UPDATE job_subtasks SET status='interrupted', finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?", [exec.subtaskId]);
+        }
+        if (exec.jobId) {
+          dbRun("UPDATE jobs SET status='interrupted', execution_status='interrupted', workflow_status='interrupted', finished_at=datetime('now'), updated_at=datetime('now') WHERE id=? AND status NOT IN ('completed', 'failed', 'cancelled')", [exec.jobId]);
+        }
+      } catch {}
+    }
+  }
+  logger.info({ component: 'agent_engine', event: 'shutdown_agents_complete' }, 'Agent processes shut down');
+};

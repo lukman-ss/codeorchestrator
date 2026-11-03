@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { dbGet, dbGetOne, dbRun } from '../database/db.js';
 import { ModelRegistry } from './model-registry.js';
 import { ModelResolver } from './model-resolver.js';
+import logger from '../logger.js';
 
 export class ModelFailover {
   /**

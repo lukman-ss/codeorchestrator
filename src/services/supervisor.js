@@ -7,6 +7,7 @@ import logger from '../logger.js';
 import { emitWebSocketEvent } from '../realtime/event-bus.js';
 import { AgentExecutionEngine } from './agent-execution-engine.js';
 import { getProject, validateProjectWorkspace } from './project-service.js';
+import { ProjectContextResolver } from './project-context-resolver.js';
 
 export class Supervisor {
   static async createJob(projectId, prompt) {
@@ -14,6 +15,15 @@ export class Supervisor {
     const wsCheck = validateProjectWorkspace(project);
     if (!wsCheck.valid) {
       throw new Error(wsCheck.error);
+    }
+    const allowLocal = Boolean(project.is_test) || process.env.NODE_ENV === 'test';
+    const resolvedContext = ProjectContextResolver.resolveProjectContext({
+      project,
+      promptText: prompt,
+      allowLocal
+    });
+    if (!resolvedContext.execution.allowed) {
+      throw new Error(resolvedContext.execution.validation_reason);
     }
     const jobId = randomUUID();
     const promptHash = createHash('sha256').update(prompt).digest('hex');
@@ -64,7 +74,7 @@ export class Supervisor {
     }
 
     dbRun(`UPDATE jobs SET status='running', started_at=datetime('now') WHERE id=?`, [jobId]);
-    logger.info({ jobId, projectId, requirements: totalReq, subtasks: subtaskIds.length, deps: edges.length }, 'Job created and scheduled');
+    logger.info({ component: 'supervisor', event: 'job_accepted', jobId, projectId, requirements: totalReq, subtasks: subtaskIds.length, deps: edges.length }, 'Job created and scheduled');
 
     emitWebSocketEvent('job.created', { job_id: jobId }, { requirements: totalReq, subtasks: subtaskIds.length, dependencies: edges.length });
 
@@ -76,13 +86,14 @@ export class Supervisor {
   static schedule(jobId) {
     if (ParallelScheduler.detectCycle(jobId)) {
       ParallelScheduler.updateState(null, 'blocked', 'dependency cycle detected', 'supervisor');
-      logger.error({ jobId }, 'Dependency cycle detected, job blocked');
+      logger.error({ component: 'supervisor', event: 'dependency_cycle', jobId }, 'Dependency cycle detected, job blocked');
       return;
     }
     const candidates = ParallelScheduler.findNextExecutableSubtasks(jobId);
     for (const st of candidates) {
       if (ParallelScheduler.claimSlot('worker')) {
         ParallelScheduler.updateState(st.id, 'queued', 'scheduled by supervisor', 'supervisor');
+        logger.info({ component: 'supervisor', event: 'subtask_dispatched', jobId, subtaskId: st.id, role: 'worker' }, 'Subtask dispatched to worker');
         AgentExecutionEngine.startWorker(st);
       }
     }

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { dbGetOne, dbRun } from '../database/db.js';
 import { getProject, detectTechnologyStack } from './project-service.js';
 import { GitOperations } from './git-operations.js';
+import { ProjectContextResolver } from './project-context-resolver.js';
 
 export class TaskContextService {
   static extractStarterRepo(prompt = '') {
@@ -37,7 +38,28 @@ export class TaskContextService {
       initialGitRev = GitOperations.getHeadCommit(workspacePath) || null;
     }
 
-    const starterRepo = overrides.starterRepository || this.extractStarterRepo(task.prompt);
+    const resolvedContext = ProjectContextResolver.resolveProjectContext({
+      project,
+      promptText: task.prompt,
+      sessionId: task.session_id,
+      overrides
+    });
+
+    const starterRepo = overrides.starterRepository ||
+      resolvedContext.repository_references.find(r => r.role === 'STARTER')?.url ||
+      this.extractStarterRepo(task.prompt);
+
+    // Persist repository references to repository_references table
+    if (resolvedContext.repository_references?.length > 0) {
+      ProjectContextResolver.persistRepositoryReferences(
+        taskId,
+        project.id,
+        resolvedContext.repository_references,
+        resolvedContext.execution.validation_result,
+        resolvedContext.execution.validation_reason
+      );
+    }
+
     const promptHash = overrides.attachmentHash || this.getPromptHash(task.prompt);
     const expectedTarget = project.repository_url || project.repo_url || overrides.expectedTargetRepository || null;
     const ownerId = overrides.ownerId || session?.user_id || project.creator_user_id || null;

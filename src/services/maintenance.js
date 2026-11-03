@@ -15,11 +15,13 @@ export const cleanupTaskEvents = () => {
 };
 
 export const scheduleCleanup = () => {
-  setInterval(() => {
+  const timer = setInterval(() => {
     try {
       cleanupTaskEvents();
     } catch (err) {
-      logger.error({ err, event: 'cleanup_error' }, 'Error during task events cleanup');
+      logger.error({ component: 'maintenance', err, event: 'cleanup_error' }, 'Error during task events cleanup');
     }
   }, CLEANUP_INTERVAL_HOURS * msPerHour);
+  if (timer.unref) timer.unref();
+  return timer;
 };
