@@ -181,8 +181,8 @@ export class TerminalUi {
     process.exit(0);
   }
 
-  isLessImpact(app) {
-    if (!app) return false;
+  getImpactLevel(app) {
+    if (!app) return 'high';
     let diff = app.diff_summary;
     if (typeof diff === 'string') {
       try { diff = JSON.parse(diff); } catch { diff = {}; }
@@ -195,13 +195,7 @@ export class TerminalUi {
     }
     files = files || [];
 
-    // More than 5 files changed is considered higher impact
-    if (files.length > 5) return false;
-
-    // Any deleted files considered higher impact
-    if ((diff.deleted || 0) > 0) return false;
-
-    // Check sensitive file patterns
+    // Check sensitive file patterns - always high impact
     const sensitive = [
       /\.env(\.|$)/i,
       /\.pem$/i,
@@ -215,17 +209,34 @@ export class TerminalUi {
     ];
     for (const f of files) {
       if (typeof f === 'string' && sensitive.some(pat => pat.test(f))) {
-        return false;
+        return 'high';
       }
     }
 
     // Check commit message for high-impact keywords
     const msg = (app.proposed_commit_message || '').toLowerCase();
-    if (msg.includes('breaking') || msg.includes('drop table') || msg.includes('schema migration')) {
-      return false;
+    if (msg.includes('breaking') || msg.includes('drop table') || msg.includes('drop database') || msg.includes('schema migration') || msg.includes('truncate')) {
+      return 'high';
     }
 
-    return true;
+    const delCount = diff.deleted || 0;
+    // More than 15 files changed or more than 3 deleted is high impact
+    if (files.length > 15 || delCount > 3) return 'high';
+
+    // 5 or fewer files changed and 0 deleted is low impact
+    if (files.length <= 5 && delCount === 0) return 'low';
+
+    // Up to 15 files changed and up to 3 deletions is medium impact
+    return 'medium';
+  }
+
+  isMediumImpact(app) {
+    const lvl = this.getImpactLevel(app);
+    return lvl === 'low' || lvl === 'medium';
+  }
+
+  isLessImpact(app) {
+    return this.isMediumImpact(app);
   }
 
   async processAutoApprovals() {
@@ -233,11 +244,12 @@ export class TerminalUi {
     this.isProcessingAutoApprove = true;
     try {
       const pending = [...this.approvals];
-      const lowImpactApps = pending.filter(a => this.isLessImpact(a));
-      for (const app of lowImpactApps) {
+      const eligibleApps = pending.filter(a => this.isMediumImpact(a));
+      for (const app of eligibleApps) {
         try {
           await this.decide(app.id, 'keep_local');
-          this.status = `Auto-approved ${app.id.slice(0, 8)} (keep_local, low impact)`;
+          const lvl = this.getImpactLevel(app);
+          this.status = `Auto-approved ${app.id.slice(0, 8)} (keep_local, ${lvl} impact)`;
         } catch (e) {
           this.status = `Auto-approve failed for ${app.id.slice(0, 8)}: ${e.message}`;
         }
@@ -560,7 +572,7 @@ export class TerminalUi {
       if (items.length > 0 && this.selected >= items.length) {
         this.selected = items.length - 1;
       }
-      const autoTag = this.autoApprove ? `${C.green}[AUTO: ON (LESS IMPACT)]${C.reset}` : `${C.dim}[AUTO: OFF]${C.reset}`;
+      const autoTag = this.autoApprove ? `${C.green}[AUTO: ON (MEDIUM IMPACT)]${C.reset}` : `${C.dim}[AUTO: OFF]${C.reset}`;
       leftLines.push(`${C.bold}${C.cyan}  PENDING APPROVALS${C.reset} ${autoTag}`);
       if (!items.length) {
         leftLines.push(`  ${C.green}✔ All clean. No approvals pending.${C.reset}`);
@@ -574,24 +586,30 @@ export class TerminalUi {
           const idx = startIdx + relIdx;
           const isSel = idx === this.selected;
           const cur = isSel ? `${C.cyan}▸${C.reset}` : ' ';
-          const isLow = this.isLessImpact(a);
-          const impactBadge = isLow ? `${C.green}[LOW]${C.reset}` : `${C.yellow}[HIGH]${C.reset}`;
+          const lvl = this.getImpactLevel(a);
+          let impactBadge = `${C.red}[HIGH]${C.reset}`;
+          if (lvl === 'low') impactBadge = `${C.green}[LOW]${C.reset}`;
+          else if (lvl === 'medium') impactBadge = `${C.yellow}[MED]${C.reset}`;
           leftLines.push(` ${cur} ${C.yellow}▲${C.reset} ${isSel ? C.bold : ''}${fit(a.id.slice(0, 14), 14)}...${C.reset} ${impactBadge}`);
         });
       }
 
       const curApp = items[this.selected];
       if (curApp) {
-        const isLow = this.isLessImpact(curApp);
+        const lvl = this.getImpactLevel(curApp);
+        const isEligible = lvl === 'low' || lvl === 'medium';
+        const impactDesc = isEligible
+          ? `${lvl === 'low' ? C.green : C.yellow}${lvl.toUpperCase()} IMPACT (eligible for auto-approval)${C.reset}`
+          : `${C.red}HIGH IMPACT (requires manual review)${C.reset}`;
         rightLines.push(`${C.bold}${C.yellow}  GATE 3 GIT APPROVAL REVIEW${C.reset}`);
         rightLines.push(`  ${C.dim}Approval ID:${C.reset} ${curApp.id}`);
         rightLines.push(`  ${C.dim}Project:${C.reset}     ${curApp.project_id}`);
         rightLines.push(`  ${C.dim}Target:${C.reset}      ${curApp.target_branch || 'main'} (base: ${curApp.reviewed_revision?.slice(0, 7) || 'HEAD'})`);
-        rightLines.push(`  ${C.dim}Impact:${C.reset}      ${isLow ? `${C.green}LOW IMPACT (eligible for auto-approval)${C.reset}` : `${C.yellow}HIGH IMPACT (requires manual review)${C.reset}`}`);
+        rightLines.push(`  ${C.dim}Impact:${C.reset}      ${impactDesc}`);
         rightLines.push(`  ${C.dim}Message:${C.reset}     ${curApp.proposed_commit_message || '(No message)'}`);
         rightLines.push('');
         rightLines.push(`${C.bold}  Decide Operation:${C.reset}`);
-        rightLines.push(`  ${this.autoApprove ? C.green : C.dim}[a] AUTO-APPROVE: ${this.autoApprove ? 'ON (Less Impact: keep_local)' : 'OFF'}${C.reset}`);
+        rightLines.push(`  ${this.autoApprove ? C.green : C.dim}[a] AUTO-APPROVE: ${this.autoApprove ? 'ON (Medium Impact: keep_local)' : 'OFF'}${C.reset}`);
         rightLines.push(`  ${C.green}[p] PUSH${C.reset}       Merge & push to upstream git remote`);
         rightLines.push(`  ${C.cyan}[k] KEEP LOCAL${C.reset} Preserve changes in workspace without push`);
         rightLines.push(`  ${C.red}[x] REJECT${C.reset}     Drop or invalidate changes`);
@@ -599,7 +617,7 @@ export class TerminalUi {
       } else {
         rightLines.push(`  ${C.dim}No pending approval selected${C.reset}`);
         rightLines.push('');
-        rightLines.push(`  ${this.autoApprove ? C.green : C.dim}[a] AUTO-APPROVE: ${this.autoApprove ? 'ON (Less Impact: keep_local)' : 'OFF'}${C.reset}`);
+        rightLines.push(`  ${this.autoApprove ? C.green : C.dim}[a] AUTO-APPROVE: ${this.autoApprove ? 'ON (Medium Impact: keep_local)' : 'OFF'}${C.reset}`);
       }
     } else if (this.tab === 'system') {
       leftLines.push(`${C.bold}${C.cyan}  SYSTEM METRICS${C.reset}`);
@@ -1017,7 +1035,7 @@ export class TerminalUi {
           'j               : Submit multi-agent job modal',
           'v               : Validate workspace (tab 1) or View full logs (tab 2)',
           'c               : Cancel running task (tab 2)',
-          'a               : Toggle Auto-Approve less impact (tab 3)',
+          'a               : Toggle Auto-Approve medium impact (tab 3)',
           'd               : View approval diff summary (tab 3)',
           'p / k / x       : Approval push / keep_local / reject (tab 3)',
           'r               : Force refresh data',
@@ -1126,7 +1144,7 @@ export class TerminalUi {
     if (this.tab === 'approvals') {
       if (str === 'a' || str === 'A') {
         this.autoApprove = !this.autoApprove;
-        this.status = `Auto-approve ${this.autoApprove ? 'ENABLED (Less Impact: keep_local)' : 'DISABLED'}`;
+        this.status = `Auto-approve ${this.autoApprove ? 'ENABLED (Medium Impact: keep_local)' : 'DISABLED'}`;
         if (this.autoApprove) {
           await this.processAutoApprovals();
         }

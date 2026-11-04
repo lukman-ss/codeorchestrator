@@ -380,8 +380,21 @@ export class GitOperations {
       const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
       try {
         execSync(`git push -u ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
-      } catch {
-        execSync(`git push ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
+      } catch (pushErr) {
+        const pushErrMsg = (pushErr.stderr?.toString() || pushErr.message || '').toLowerCase();
+        if (pushErrMsg.includes('non-fast-forward') || pushErrMsg.includes('fetch first')) {
+          try {
+            // Attempt clean rebase on top of remote branch
+            execSync(`git pull --rebase ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
+            execSync(`git push -u ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
+          } catch {
+            // If rebase fails or conflicts, abort rebase cleanly
+            try { execSync('git rebase --abort', { cwd: workspacePath, env, stdio: 'pipe' }); } catch {}
+            execSync(`git push ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
+          }
+        } else {
+          execSync(`git push ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
+        }
       }
 
       // Verify remote commit

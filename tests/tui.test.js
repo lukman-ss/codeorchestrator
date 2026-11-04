@@ -347,7 +347,7 @@ test('TUI unit: pointer in projects defaults to active project and preserves per
   assert.equal(ui.selected, 1); // Preserved!
 });
 
-test('TUI unit: toggle auto-approve in approvals tab auto-decides less impact approvals via keep_local', async () => {
+test('TUI unit: toggle auto-approve in approvals tab auto-decides medium impact approvals via keep_local', async () => {
   const decided = [];
   const ui = new TerminalUi({
     api: async (url, opts) => {
@@ -376,18 +376,49 @@ test('TUI unit: toggle auto-approve in approvals tab auto-decides less impact ap
     proposed_commit_message: 'fix: update env'
   };
   const app3 = {
-    id: 'app-high-del',
+    id: 'app-med-del',
     project_id: 'p1',
     files_changed: ['src/old.js'],
     diff_summary: { added: 0, modified: 0, deleted: 2 },
     proposed_commit_message: 'refactor: delete old files'
   };
+  const app4 = {
+    id: 'app-high-many-files',
+    project_id: 'p1',
+    files_changed: Array.from({ length: 18 }, (_, i) => `src/file_${i}.js`),
+    diff_summary: { added: 18, modified: 0, deleted: 0 },
+    proposed_commit_message: 'feat: massive overhaul'
+  };
+  const app5 = {
+    id: 'app-high-many-deletions',
+    project_id: 'p1',
+    files_changed: ['src/a.js'],
+    diff_summary: { added: 0, modified: 0, deleted: 6 },
+    proposed_commit_message: 'chore: remove entire module'
+  };
+  const app6 = {
+    id: 'app-high-breaking',
+    project_id: 'p1',
+    files_changed: ['src/api.js'],
+    diff_summary: { added: 1, modified: 1, deleted: 0 },
+    proposed_commit_message: 'feat: breaking change to public API'
+  };
 
-  assert.equal(ui.isLessImpact(app1), true);
-  assert.equal(ui.isLessImpact(app2), false);
-  assert.equal(ui.isLessImpact(app3), false);
+  assert.equal(ui.getImpactLevel(app1), 'low');
+  assert.equal(ui.getImpactLevel(app2), 'high');
+  assert.equal(ui.getImpactLevel(app3), 'medium');
+  assert.equal(ui.getImpactLevel(app4), 'high');
+  assert.equal(ui.getImpactLevel(app5), 'high');
+  assert.equal(ui.getImpactLevel(app6), 'high');
 
-  ui.approvals = [app1, app2, app3];
+  assert.equal(ui.isMediumImpact(app1), true);
+  assert.equal(ui.isMediumImpact(app2), false);
+  assert.equal(ui.isMediumImpact(app3), true);
+  assert.equal(ui.isMediumImpact(app4), false);
+  assert.equal(ui.isMediumImpact(app5), false);
+  assert.equal(ui.isMediumImpact(app6), false);
+
+  ui.approvals = [app1, app2, app3, app4, app5, app6];
   ui.tabIndex = 2; // Approvals tab
 
   // Toggle auto-approve ON with 'a'
@@ -395,10 +426,12 @@ test('TUI unit: toggle auto-approve in approvals tab auto-decides less impact ap
   await ui.handleKey('a', { name: 'a' });
   assert.equal(ui.autoApprove, true);
 
-  // app1 must have been auto-decided with keep_local; app2 and app3 must NOT be auto-decided
-  assert.equal(decided.length, 1);
+  // app1 (low) and app3 (medium) must have been auto-decided with keep_local; others must NOT
+  assert.equal(decided.length, 2);
   assert.equal(decided[0].url, '/approvals/app-low-1/decide');
   assert.equal(decided[0].body.decision, 'keep_local');
+  assert.equal(decided[1].url, '/approvals/app-med-del/decide');
+  assert.equal(decided[1].body.decision, 'keep_local');
 
   // Toggle auto-approve OFF with 'a'
   await ui.handleKey('a', { name: 'a' });
