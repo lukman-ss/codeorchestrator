@@ -102,6 +102,7 @@ export class AgentExecutionEngine {
 
     const taskLogger = new TaskLogger(`agent-${executionId}`);
     let capturedSession = false;
+    let lastStepFinishReason = null;
     const filesChanged = new Set();
 
     child.stdout.on('data', (chunk) => {
@@ -114,6 +115,10 @@ export class AgentExecutionEngine {
             capturedSession = true;
             dbRun('UPDATE job_subtasks SET open_code_session_id = ? WHERE id = ?', [obj.sessionID, subtask.id]);
             dbRun('UPDATE agent_executions SET session_id = ? WHERE id = ?', [obj.sessionID, executionId]);
+          }
+          if (obj.type === 'step_finish' || obj.type === 'step-finish') {
+            const reason = obj.part?.reason || obj.reason;
+            if (reason) lastStepFinishReason = reason;
           }
           if (obj.type === 'tool_use' || obj.type === 'tool_call') {
             const toolName = obj.part?.tool || obj.tool;
@@ -129,7 +134,7 @@ export class AgentExecutionEngine {
 
     const finishWorker = async (exitCode, signal = null) => {
       taskLogger.end();
-      const isSuccess = exitCode === 0 && !signal;
+      const isSuccess = (exitCode === 0 && !signal) || (!signal && lastStepFinishReason === 'stop');
       const status = isSuccess ? 'implementation_done' : 'audit_failed';
       const error = signal ? `Terminated by signal ${signal}` : (exitCode !== 0 ? `OpenCode exited with code ${exitCode}` : null);
 

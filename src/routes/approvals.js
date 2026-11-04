@@ -12,7 +12,7 @@ export default async function approvals(app) {
   // List pending approval requests
   app.get('/approvals/pending', async (req, reply) => {
     try {
-      const items = ApprovalService.listPendingApprovals(req.query?.projectId || null);
+      const items = ApprovalService.listPendingApprovals(req.query?.projectId || null, req.query?.userId || null);
       reply.send(items);
     } catch (err) {
       reply.code(500).send({ error: err.message });

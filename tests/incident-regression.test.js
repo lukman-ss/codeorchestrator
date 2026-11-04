@@ -209,7 +209,7 @@ test('Incident B: Crash recovery resumes queued tasks and reconciles running tas
   `);
 
   // Call recoverRunning
-  recoverRunning();
+  recoverRunning('test-task-running');
 
   const recovered = dbGetOne("SELECT * FROM tasks WHERE id = 'test-task-running'");
   assert.equal(recovered.status, 'interrupted');

@@ -666,3 +666,147 @@ test('23. /code project info formats details and hides host workspace path', asy
     config.allowedUserIds = prevUsers;
   }
 });
+
+test('24. /code project set binds project to channel and persists', async () => {
+  const originalResolve = defaultApiClient.resolveProject;
+  const prevGuilds = config.allowedGuildIds;
+  const prevChannels = config.allowedChannelIds;
+  const prevUsers = config.allowedUserIds;
+
+  try {
+    config.allowedGuildIds = ['guild-100'];
+    config.allowedChannelIds = ['channel-200'];
+    config.allowedUserIds = ['user-300'];
+
+    defaultApiClient.resolveProject = async (p) => ({
+      id: 'proj-set-123',
+      slug: 'ballo-starter',
+      name: 'Ballo Starter'
+    });
+
+    const interaction = createMockInteraction({
+      subcommandGroup: 'project',
+      subcommand: 'set',
+      guildId: 'guild-100',
+      channelId: 'channel-200',
+      userId: 'user-300',
+      options: { project: 'ballo-starter' }
+    });
+
+    await execute(interaction);
+
+    const replies = interaction.getReplies();
+    assert.ok(replies.length > 0);
+    const lastReply = replies[replies.length - 1];
+    assert.ok(lastReply.content.includes('Channel active project set to **Ballo Starter**'));
+  } finally {
+    defaultApiClient.resolveProject = originalResolve;
+    config.allowedGuildIds = prevGuilds;
+    config.allowedChannelIds = prevChannels;
+    config.allowedUserIds = prevUsers;
+  }
+});
+
+test('25. /code run falls back to channel active project when project option is omitted', async () => {
+  const originalResolve = defaultApiClient.resolveProject;
+  const originalCreateTask = defaultApiClient.createTask;
+  const prevGuilds = config.allowedGuildIds;
+  const prevChannels = config.allowedChannelIds;
+  const prevUsers = config.allowedUserIds;
+
+  let createdWithProjectId = null;
+
+  try {
+    config.allowedGuildIds = ['guild-100'];
+    config.allowedChannelIds = ['channel-200'];
+    config.allowedUserIds = ['user-300'];
+
+    defaultApiClient.resolveProject = async (p) => ({
+      id: 'proj-set-123',
+      slug: 'ballo-starter',
+      name: 'Ballo Starter'
+    });
+    defaultApiClient.createTask = async (projId, body) => {
+      createdWithProjectId = projId;
+      return { id: 'task-fallback-999', status: 'queued' };
+    };
+
+    const interaction = createMockInteraction({
+      subcommand: 'run',
+      guildId: 'guild-100',
+      channelId: 'channel-200',
+      userId: 'user-300',
+      options: { prompt: 'Implement health check endpoint' }
+    });
+
+    await execute(interaction);
+
+    assert.equal(createdWithProjectId, 'proj-set-123');
+    const replies = interaction.getReplies();
+    assert.ok(replies.length > 0);
+    const lastReply = replies[replies.length - 1];
+    assert.ok(lastReply.content.includes('task-fallback-999'));
+  } finally {
+    defaultApiClient.resolveProject = originalResolve;
+    defaultApiClient.createTask = originalCreateTask;
+    config.allowedGuildIds = prevGuilds;
+    config.allowedChannelIds = prevChannels;
+    config.allowedUserIds = prevUsers;
+  }
+});
+
+test('26. /code job falls back to channel active project when project option is omitted', async () => {
+  const originalResolve = defaultApiClient.resolveProject;
+  const originalCreateJob = defaultApiClient.createJob;
+  const originalGetJob = defaultApiClient.getJob;
+  const prevGuilds = config.allowedGuildIds;
+  const prevChannels = config.allowedChannelIds;
+  const prevUsers = config.allowedUserIds;
+
+  let createdWithProjectId = null;
+
+  try {
+    config.allowedGuildIds = ['guild-100'];
+    config.allowedChannelIds = ['channel-200'];
+    config.allowedUserIds = ['user-300'];
+
+    defaultApiClient.resolveProject = async (p) => ({
+      id: 'proj-set-123',
+      slug: 'ballo-starter',
+      name: 'Ballo Starter'
+    });
+    defaultApiClient.createJob = async (projId, prompt) => {
+      createdWithProjectId = projId;
+      return { id: 'job-fallback-777', status: 'queued' };
+    };
+    defaultApiClient.getJob = async (jobId) => ({
+      id: jobId,
+      status: 'queued',
+      total_requirements: 3,
+      verified_requirements: 0
+    });
+
+    const interaction = createMockInteraction({
+      subcommand: 'job',
+      guildId: 'guild-100',
+      channelId: 'channel-200',
+      userId: 'user-300',
+      options: { prompt: 'Build auth and user profile modules' }
+    });
+
+    await execute(interaction);
+
+    assert.equal(createdWithProjectId, 'proj-set-123');
+    const replies = interaction.getReplies();
+    assert.ok(replies.length > 0);
+    const lastReply = replies[replies.length - 1];
+    assert.ok(lastReply.content.includes('job-fallback-777'));
+  } finally {
+    defaultApiClient.resolveProject = originalResolve;
+    defaultApiClient.createJob = originalCreateJob;
+    defaultApiClient.getJob = originalGetJob;
+    config.allowedGuildIds = prevGuilds;
+    config.allowedChannelIds = prevChannels;
+    config.allowedUserIds = prevUsers;
+  }
+});

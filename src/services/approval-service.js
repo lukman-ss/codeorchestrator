@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { dbGetOne, dbRun, dbGet } from '../database/db.js';
 import { getProject } from './project-service.js';
 import { GitOperations } from './git-operations.js';
@@ -66,23 +67,66 @@ export class ApprovalService {
     return row;
   }
 
-  static listPendingApprovals(projectId = null) {
+  static listPendingApprovals(projectId = null, userId = null) {
+    let resolvedProjectId = projectId;
+    if (projectId) {
+      try {
+        const proj = getProject(projectId);
+        if (proj) resolvedProjectId = proj.id;
+      } catch {}
+    }
+
     let sql = "SELECT * FROM git_approval_requests WHERE status = 'pending' ORDER BY created_at DESC";
     let params = [];
-    if (projectId) {
+    if (resolvedProjectId) {
       sql = "SELECT * FROM git_approval_requests WHERE status = 'pending' AND project_id = ? ORDER BY created_at DESC";
-      params = [projectId];
+      params = [resolvedProjectId];
     }
     const rows = dbGet(sql, params);
-    return rows.map(r => {
+    const validRows = [];
+
+    for (const r of rows) {
+      // Invalidate if workspace HEAD commit has moved since review
+      const project = getProject(r.project_id);
+      if (project?.workspace_path && existsSync(project.workspace_path)) {
+        try {
+          const currentRev = GitOperations.getHeadCommit(project.workspace_path);
+          if (r.base_revision && currentRev && currentRev !== r.reviewed_revision && currentRev !== r.base_revision) {
+            const reason = `Code changed after security review (Current: ${currentRev}, Reviewed: ${r.reviewed_revision})`;
+            dbRun("UPDATE git_approval_requests SET status = 'invalidated', invalidated_at = datetime('now'), invalidation_reason = ? WHERE id = ?",
+              [reason, r.id]);
+            continue;
+          }
+        } catch {}
+      }
+
+      // Filter by authorization if userId is provided ("approval hanya muncul yang bisa di approve")
+      if (userId && !this.isUserAuthorizedToApprove(r, userId)) {
+        continue;
+      }
+
       try { r.diff_summary = JSON.parse(r.diff_summary_json || '{}'); } catch { r.diff_summary = {}; }
       try { r.files_changed = JSON.parse(r.files_changed_json || '[]'); } catch { r.files_changed = []; }
-      return r;
-    });
+      validRows.push(r);
+    }
+
+    return validRows;
   }
 
   static isUserAuthorizedToApprove(approval, userId, memberRoles = []) {
     if (!userId) return false;
+
+    // Local CLI / TUI / operator is always authorized
+    const localUsers = new Set(['cli-user', 'tui-user', 'operator', 'admin', 'system', process.env.USER].filter(Boolean));
+    if (localUsers.has(userId)) return true;
+
+    // Check if admin roles or user matches config admin (including DISCORD_ADMIN_USER_IDS)
+    const adminUsers = [
+      ...(process.env.ADMIN_USER_IDS || '').split(','),
+      ...(process.env.DISCORD_ADMIN_USER_IDS || '').split(',')
+    ].map(s => s.trim()).filter(Boolean);
+    if (adminUsers.includes(userId)) return true;
+
     // Task or Job owner
     if (approval.task_id) {
       const task = dbGetOne('SELECT * FROM tasks WHERE id = ?', [approval.task_id]);
@@ -97,10 +141,6 @@ export class ApprovalService {
     if (project) {
       if (project.creator_user_id && project.creator_user_id === userId) return true;
     }
-
-    // Check if admin roles or user matches config admin
-    const adminUsers = (process.env.ADMIN_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
-    if (adminUsers.includes(userId)) return true;
 
     // Default permissive for authorized project users if no specific creator
     if (!project?.creator_user_id) return true;
@@ -226,15 +266,37 @@ export class ApprovalService {
 
       // Phase B — Commit task-owned changes
       let commitSha = null;
-      if (approval.files_changed && approval.files_changed.length > 0) {
+      let filesToCommit = approval.files_changed || [];
+
+      // Auto-fallback: if no files listed in approval request, but workspace has uncommitted files
+      if (filesToCommit.length === 0) {
+        const pending = GitOperations.getTaskOwnedChanges(workspacePath, null);
+        if (pending.length > 0) {
+          filesToCommit = pending;
+        }
+      }
+
+      if (filesToCommit.length > 0) {
         const commitRes = GitOperations.commitApprovedChanges(
           workspacePath,
-          approval.files_changed,
+          filesToCommit,
           approval.proposed_commit_message
         );
         commitSha = commitRes.commitSha;
       } else {
         commitSha = GitOperations.getHeadCommit(workspacePath);
+      }
+
+      // If still no commit exists in repository, gracefully preserve locally instead of crashing
+      if (!commitSha) {
+        logger.info({ approvalId: approval.id, workspacePath }, 'No commits exist to push; preserving local workspace');
+        dbRun("UPDATE git_approval_requests SET status = 'approved_keep_local' WHERE id = ?", [approval.id]);
+        this.markWorkflowCompleted(approval, 'NO_CHANGES', null);
+        return {
+          success: true,
+          noChanges: true,
+          message: 'No commits to push; workspace preserved locally.'
+        };
       }
 
       // Phase C — Push
@@ -258,15 +320,16 @@ export class ApprovalService {
           diverged: pushRes.diverged
         });
 
-        // Do NOT mark task COMPLETED!
+        // Set error message on task and job so failure reason is never null
+        const pushError = `Git push failed: ${pushRes.reason}`;
         if (approval.task_id) {
-          dbRun("UPDATE tasks SET status = 'failed', workflow_status = 'failed' WHERE id = ?", [approval.task_id]);
+          dbRun("UPDATE tasks SET status = 'failed', workflow_status = 'failed', error = ? WHERE id = ?", [pushError, approval.task_id]);
         }
         if (approval.job_id) {
-          dbRun("UPDATE jobs SET workflow_status = 'failed' WHERE id = ?", [approval.job_id]);
+          dbRun("UPDATE jobs SET workflow_status = 'failed', error = ? WHERE id = ?", [pushError, approval.job_id]);
         }
-        dbRun("UPDATE workflow_reviews SET git_status = 'PUSH_FAILED', workflow_status = 'failed' WHERE (task_id = ? OR job_id = ?)",
-          [approval.task_id, approval.job_id]);
+        dbRun("UPDATE workflow_reviews SET git_status = 'PUSH_FAILED', workflow_status = 'failed', report_json = ? WHERE (task_id = ? OR job_id = ?)",
+          [JSON.stringify({ error: pushError, diverged: pushRes.diverged }), approval.task_id, approval.job_id]);
 
         return {
           success: false,
@@ -423,11 +486,11 @@ export class ApprovalService {
 
   static markWorkflowCompleted(approval, gitStatus, commitSha) {
     if (approval.task_id) {
-      dbRun("UPDATE tasks SET workflow_status = 'completed', status = 'completed', updated_at = datetime('now') WHERE id = ?", [approval.task_id]);
+      dbRun("UPDATE tasks SET workflow_status = 'completed', status = 'completed', error = null, updated_at = datetime('now') WHERE id = ?", [approval.task_id]);
       emitWebSocketEvent('task.completed', null, { taskId: approval.task_id, gitStatus, commitSha });
     }
     if (approval.job_id) {
-      dbRun("UPDATE jobs SET workflow_status = 'completed', status = 'completed', updated_at = datetime('now') WHERE id = ?", [approval.job_id]);
+      dbRun("UPDATE jobs SET workflow_status = 'completed', status = 'completed', error = null, updated_at = datetime('now') WHERE id = ?", [approval.job_id]);
       emitWebSocketEvent('job.completed', null, { jobId: approval.job_id, gitStatus, commitSha });
     }
     dbRun(

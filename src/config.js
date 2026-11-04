@@ -78,3 +78,6 @@ export const DISK_CHECK_INTERVAL_SECONDS = Number(process.env.DISK_CHECK_INTERVA
 export const DISK_FREE_THRESHOLD_MB = MIN_FREE_DISK_MB;
 
 export const CANCEL_TIMEOUT_MS = TASK_KILL_GRACE_SECONDS * 1000;
+
+export const GIT_USER_NAME = process.env.GIT_USER_NAME || 'Coding Orchestrator';
+export const GIT_USER_EMAIL = process.env.GIT_USER_EMAIL || 'orchestrator@local';

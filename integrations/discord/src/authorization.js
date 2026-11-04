@@ -102,6 +102,7 @@ export class AuthorizationService {
 
   isProjectAllowedForUser(userId, memberRoles = [], project) {
     if (!project) return false;
+    if (this.isAdmin(userId, memberRoles)) return true;
     const projectSlug = project.slug || project;
     const projectId = project.id || project;
 

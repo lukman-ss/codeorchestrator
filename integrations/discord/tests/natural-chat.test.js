@@ -17,6 +17,7 @@ function createMockAuth(overrides = {}) {
     allowedChannelIds: [],
     allowedUserIds: ['*'],
     allowedRoleIds: ['*'],
+    allowedProjects: ['*'],
     ...overrides
   });
 }
@@ -96,6 +97,18 @@ function createMockApiClient(overrides = {}) {
         response: assistantText,
         status: 'idle'
       };
+    },
+    async resolveProject(slugOrId) {
+      if (overrides.resolveProject) return overrides.resolveProject(slugOrId);
+      return { id: 'proj-' + slugOrId, slug: slugOrId, name: slugOrId };
+    },
+    async getProject(id) {
+      if (overrides.getProject) return overrides.getProject(id);
+      return { id, slug: id.replace('proj-', ''), name: id };
+    },
+    async createTask(projectId, body) {
+      if (overrides.createTask) return overrides.createTask(projectId, body);
+      return { id: 'task-test-' + Math.random().toString(36).slice(2, 7), status: 'queued' };
     }
   };
 }
@@ -1047,5 +1060,139 @@ test('28. Natural Chat: restart reconciliation transitions running/queued messag
   assert.equal(persistence.getSessionMessage('msg-run').status, 'failed');
   assert.ok(persistence.getSessionMessage('msg-run').error.includes('restart'));
   assert.equal(persistence.getSessionMessage('msg-comp').status, 'completed');
+  persistence.close();
+});
+
+// 29. Natural Chat: project switching intent binds project to channel
+test('29. Natural Chat: set project and use project switch channel active project', async () => {
+  const persistence = createMockPersistence();
+  const apiClient = createMockApiClient({
+    resolveProject: async (slug) => ({
+      id: 'proj-' + slug,
+      slug,
+      name: `Project ${slug}`
+    })
+  });
+  const auth = createMockAuth();
+  const client = createMockClient();
+
+  const msg1 = createMockDiscordMessage({
+    content: `<@${client.user.id}> set project ballo-starter`,
+    isMention: true,
+    guildId: 'guild-100',
+    channelId: 'channel-200',
+    userId: 'user-alice'
+  });
+
+  await handleMessage(msg1, client, apiClient, persistence, auth);
+
+  assert.equal(msg1._replies.length, 1);
+  assert.ok(msg1._replies[0].content.includes('Active project for this channel set to **Project ballo-starter**'));
+
+  const saved = persistence.getChannelProject('guild-100', 'channel-200');
+  assert.ok(saved);
+  assert.equal(saved.project_slug, 'ballo-starter');
+  assert.equal(saved.project_id, 'proj-ballo-starter');
+
+  persistence.close();
+});
+
+// 30. Natural Chat: direct task execution via task:
+test('30. Natural Chat: direct task execution via task: dispatches task with channel active project', async () => {
+  const persistence = createMockPersistence();
+  let createdPayload = null;
+
+  const apiClient = createMockApiClient({
+    resolveProject: async (slug) => ({
+      id: 'proj-' + slug,
+      slug,
+      name: `Project ${slug}`
+    }),
+    createTask: async (projId, body) => {
+      createdPayload = { projId, body };
+      return { id: 'task-dispatched-123', status: 'queued' };
+    }
+  });
+  const auth = createMockAuth();
+  const client = createMockClient();
+
+  // Set channel project first
+  persistence.setChannelProject({
+    guildId: 'guild-100',
+    channelId: 'channel-200',
+    projectId: 'proj-ballo',
+    projectSlug: 'ballo',
+    userId: 'user-alice'
+  });
+
+  const msg = createMockDiscordMessage({
+    content: `<@${client.user.id}> task: implement JWT authentication handler`,
+    isMention: true,
+    guildId: 'guild-100',
+    channelId: 'channel-200',
+    userId: 'user-alice'
+  });
+
+  await handleMessage(msg, client, apiClient, persistence, auth);
+
+  assert.ok(createdPayload);
+  assert.equal(createdPayload.projId, 'proj-ballo');
+  assert.equal(createdPayload.body.prompt, 'implement JWT authentication handler');
+
+  assert.equal(msg._replies.length, 1);
+  assert.ok(msg._replies[0].content.includes('task-dispatched-123'));
+
+  persistence.close();
+});
+
+// 31. Natural Chat: direct task execution via run: and kirim task:
+test('31. Natural Chat: direct task execution via run: and kirim task:', async () => {
+  const persistence = createMockPersistence();
+  const createdTasks = [];
+
+  const apiClient = createMockApiClient({
+    resolveProject: async (slug) => ({
+      id: 'proj-' + slug,
+      slug,
+      name: `Project ${slug}`
+    }),
+    createTask: async (projId, body) => {
+      createdTasks.push({ projId, prompt: body.prompt });
+      return { id: 'task-' + Math.random().toString(36).slice(2, 7), status: 'queued' };
+    }
+  });
+  const auth = createMockAuth();
+  const client = createMockClient();
+
+  persistence.setChannelProject({
+    guildId: 'guild-100',
+    channelId: 'channel-200',
+    projectId: 'proj-ballo',
+    projectSlug: 'ballo',
+    userId: 'user-alice'
+  });
+
+  const msg1 = createMockDiscordMessage({
+    content: `<@${client.user.id}> run: add integration tests for api router`,
+    isMention: true,
+    guildId: 'guild-100',
+    channelId: 'channel-200',
+    userId: 'user-alice'
+  });
+  await handleMessage(msg1, client, apiClient, persistence, auth);
+
+  const msg2 = createMockDiscordMessage({
+    content: `<@${client.user.id}> kirim task: perbaiki memory leak di connection pool`,
+    isMention: true,
+    guildId: 'guild-100',
+    channelId: 'channel-200',
+    userId: 'user-alice'
+  });
+  await handleMessage(msg2, client, apiClient, persistence, auth);
+
+  assert.equal(createdTasks.length, 2);
+  assert.equal(createdTasks[0].prompt, 'add integration tests for api router');
+  assert.equal(createdTasks[1].prompt, 'perbaiki memory leak di connection pool');
+
   persistence.close();
 });

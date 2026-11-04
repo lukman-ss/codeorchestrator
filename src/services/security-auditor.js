@@ -80,7 +80,7 @@ const SECRET_PATTERNS = [
 ];
 
 // Forbidden files regex (forbidden in repository diffs / commits)
-const FORBIDDEN_FILE_REGEX = /(^|\/)(\.env|\.env\.[^.]*|.*\.db|.*\.db-(?:wal|shm)|.*\.sqlite[0-9]?|.*\.log|.*\.log\.gz|.*\.sql|.*\.dump|.*\.bak|id_rsa|id_ed25519|.*\.pem|.*\.key)$/i;
+const FORBIDDEN_FILE_REGEX = /(^|\/)(\.env|\.env\.[^.]*|.*\.db|.*\.db-(?:wal|shm)|.*\.sqlite[0-9]?|.*\.log|.*\.log\.gz|.*\.dump|.*\.dmp|.*(?:dump|backup).*\.sql|.*\.bak|id_rsa|id_ed25519|.*\.pem|.*\.key)$/i;
 
 // Confidential infrastructure / PII patterns
 const CONFIDENTIAL_PATTERNS = [
@@ -133,13 +133,28 @@ export class SecurityAuditor {
   static scanFileContent(content, relPath) {
     const findings = [];
     const lines = content.split(/\r?\n/);
+    const isExampleOrTemplate = /\.(example|template|sample)$/i.test(relPath) || /(?:^|\/)\.env\.(example|template|sample)$/i.test(relPath);
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const lineNum = i + 1;
 
+      // Skip dummy/placeholder lines in example and template files
+      if (isExampleOrTemplate) {
+        if (/localhost|example|dummy|change-me|user:password|username:password|postgres:postgres/i.test(line)) {
+          continue;
+        }
+      }
+
       // Check secrets
       for (const pat of SECRET_PATTERNS) {
+        if (isExampleOrTemplate && (
+          pat.name === 'Database Connection String with Credentials' ||
+          pat.name === 'High-Entropy API Key / Orchestrator Token'
+        )) {
+          continue;
+        }
+
         if (pat.regex.test(line)) {
           findings.push({
             category: pat.category,
@@ -255,8 +270,10 @@ export class SecurityAuditor {
     }
 
     for (const relPath of filesToScan) {
+      const isExampleOrTemplate = /\.(example|template|sample)$/i.test(relPath) || /(?:^|\/)\.env\.(example|template|sample)$/i.test(relPath);
+
       // Check forbidden file names
-      if (FORBIDDEN_FILE_REGEX.test(relPath) && !relPath.endsWith('.env.example')) {
+      if (FORBIDDEN_FILE_REGEX.test(relPath) && !isExampleOrTemplate) {
         findings.push({
           category: 'Git & Supply Chain Security',
           severity: 'CRITICAL',

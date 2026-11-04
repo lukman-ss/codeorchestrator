@@ -354,6 +354,7 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
       let stderrText = '';
       let capturedSessionId = session.opencode_session_id || null;
       let assistantResponse = '';
+      let lastStepFinishReason = null;
 
       const timeoutMs = (TASK_TIMEOUT_SECONDS || 3600) * 1000;
       const timer = setTimeout(() => {
@@ -367,6 +368,10 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
           if (ev.sessionID && !capturedSessionId) {
             capturedSessionId = ev.sessionID;
             dbRun("UPDATE sessions SET opencode_session_id = ?, updated_at = datetime('now') WHERE id = ?", [capturedSessionId, session.id]);
+          }
+          if (ev.type === 'step_finish' || ev.type === 'step-finish') {
+            const reason = ev.part?.reason || ev.reason;
+            if (reason) lastStepFinishReason = reason;
           }
           if (ev.type === 'text') {
             const partText = ev.part?.text || ev.text || '';
@@ -408,7 +413,8 @@ export const executeSessionMessage = async (sessionId, { prompt, model, userId }
           processJsonLine(stdoutBuffer);
           stdoutBuffer = '';
         }
-        if (code === 0 && !signal) {
+        const isSuccess = (code === 0 && !signal) || (!signal && lastStepFinishReason === 'stop');
+        if (isSuccess) {
           try {
             ModelRegistry.recordExecutionSuccess(targetModel);
             ModelRouter.recordOutcome({ modelId: targetModel, category: 'general_conversation', verified: true });

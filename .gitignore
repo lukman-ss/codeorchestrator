@@ -42,6 +42,7 @@ workspaces/
 .agent-worktrees/
 .opencode/
 *.pid
+.co-project
 
 # Stray local root artifacts
 /a.txt

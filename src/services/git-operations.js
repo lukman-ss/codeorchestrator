@@ -2,6 +2,7 @@ import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { validateGitHubUrl, getProject } from './project-service.js';
+import { GIT_USER_NAME, GIT_USER_EMAIL } from '../config.js';
 import logger from '../logger.js';
 
 export const GIT_STATES = {
@@ -10,7 +11,7 @@ export const GIT_STATES = {
   GIT_REMOTE_CONFIGURED: 'GIT_REMOTE_CONFIGURED'
 };
 
-const FORBIDDEN_FILE_REGEX = /(^|\/)(\.env|\.env\.[^.]*|.*\.db|.*\.db-(?:wal|shm)|.*\.sqlite[0-9]?|.*\.log|.*\.log\.gz|.*\.sql|.*\.dump|.*\.bak|id_rsa|id_ed25519|.*\.pem|.*\.key)$/i;
+const FORBIDDEN_FILE_REGEX = /(^|\/)(\.env|\.env\.[^.]*|.*\.db|.*\.db-(?:wal|shm)|.*\.sqlite[0-9]?|.*\.log|.*\.log\.gz|.*\.dump|.*\.dmp|.*(?:dump|backup).*\.sql|.*\.bak|id_rsa|id_ed25519|.*\.pem|.*\.key)$/i;
 
 export class GitOperations {
   static getGitState(workspacePath) {
@@ -31,8 +32,8 @@ export class GitOperations {
     if (!this.isGitRepo(workspacePath)) {
       execSync(`git init -b "${defaultBranch}" --quiet`, { cwd: workspacePath, stdio: 'pipe' });
       try {
-        execSync('git config user.name "CodeOrchestrator"', { cwd: workspacePath, stdio: 'pipe' });
-        execSync('git config user.email "orchestrator@local"', { cwd: workspacePath, stdio: 'pipe' });
+        execSync(`git config user.name "${GIT_USER_NAME}"`, { cwd: workspacePath, stdio: 'pipe' });
+        execSync(`git config user.email "${GIT_USER_EMAIL}"`, { cwd: workspacePath, stdio: 'pipe' });
       } catch {}
       return true;
     }
@@ -148,17 +149,9 @@ export class GitOperations {
         const state = line.slice(0, 2);
 
         // Filter out forbidden secret files
-        if (FORBIDDEN_FILE_REGEX.test(file) && !file.endsWith('.env.example')) {
+        const isExampleOrTemplate = /\.(example|template|sample)$/i.test(file) || /(?:^|\/)\.env\.(example|template|sample)$/i.test(file);
+        if (FORBIDDEN_FILE_REGEX.test(file) && !isExampleOrTemplate) {
           continue;
-        }
-
-        // If baseline exists, check if file was untracked/modified identically before
-        if (baseline && baseline.statusMap && baseline.statusMap.has(file)) {
-          const priorState = baseline.statusMap.get(file);
-          if (priorState === state) {
-            // Unchanged by current task - pre-existing user modification
-            continue;
-          }
         }
 
         taskFiles.push(file);
@@ -319,13 +312,14 @@ export class GitOperations {
     }
 
     // Configure safe local committer
-    execSync('git config user.name "Coding Orchestrator"', { cwd: workspacePath, stdio: 'pipe' });
-    execSync('git config user.email "orchestrator@local"', { cwd: workspacePath, stdio: 'pipe' });
+    execSync(`git config user.name "${GIT_USER_NAME}"`, { cwd: workspacePath, stdio: 'pipe' });
+    execSync(`git config user.email "${GIT_USER_EMAIL}"`, { cwd: workspacePath, stdio: 'pipe' });
 
     // Stage ONLY task-owned files (never git add -A or git add .)
     for (const f of taskFiles) {
       // Exclude secrets
-      if (FORBIDDEN_FILE_REGEX.test(f) && !f.endsWith('.env.example')) continue;
+      const isExampleOrTemplate = /\.(example|template|sample)$/i.test(f) || /(?:^|\/)\.env\.(example|template|sample)$/i.test(f);
+      if (FORBIDDEN_FILE_REGEX.test(f) && !isExampleOrTemplate) continue;
       try {
         execSync(`git add -- "${f}"`, { cwd: workspacePath, stdio: 'pipe' });
       } catch (err) {
@@ -356,6 +350,12 @@ export class GitOperations {
 
     // Verify commit before pushing
     const currentHead = this.getHeadCommit(workspacePath);
+    if (!currentHead) {
+      return {
+        success: false,
+        reason: 'Repository has no commits to push (HEAD is null)'
+      };
+    }
     if (expectedCommitSha && currentHead !== expectedCommitSha) {
       return {
         success: false,
@@ -365,9 +365,24 @@ export class GitOperations {
     }
 
     try {
-      // Non-interactive push without force
+      // If remote URL is HTTPS github.com without credentials, switch to configured SSH alias for authentication
+      const remoteUrl = this.getRemoteUrl(workspacePath, remote);
+      if (remoteUrl && remoteUrl.startsWith('https://github.com/')) {
+        const match = remoteUrl.match(/^https:\/\/github\.com\/([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+?)(?:\.git)?\/?$/);
+        if (match) {
+          try {
+            execSync(`git remote set-url ${remote} "git@github-coding:${match[1]}/${match[2]}.git"`, { cwd: workspacePath, stdio: 'pipe' });
+          } catch {}
+        }
+      }
+
+      // Non-interactive push without force; set upstream if first push
       const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-      execSync(`git push ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
+      try {
+        execSync(`git push -u ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
+      } catch {
+        execSync(`git push ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
+      }
 
       // Verify remote commit
       return { success: true, commitSha: currentHead, remote, branch };

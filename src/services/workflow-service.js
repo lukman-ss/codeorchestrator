@@ -33,7 +33,7 @@ export class WorkflowService {
     acceptanceCriteria = [],
     baseline = null,
     taskFiles = [],
-    autoRepair = false,
+    autoRepair = true,
     repairAttempt = 0,
     maxRepairAttempts = MAX_REPAIR_ATTEMPTS
   }) {

@@ -1,6 +1,6 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -41,8 +41,8 @@ before(async () => {
   testRepoPath = makeTempGitRepo('shared-gate-repo-');
   try {
     dbRun(
-      `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
-       VALUES (?, ?, ?, ?, 'main', '{}')`,
+      `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json, is_test)
+       VALUES (?, ?, ?, ?, 'main', '{}', 1)`,
       [testProjectId, 'Gate Test Project', 'gate-test-proj-' + Date.now(), testRepoPath]
     );
   } catch {}
@@ -55,6 +55,9 @@ after(async () => {
   for (const d of tempDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch {}
   }
+  try {
+    dbRun("DELETE FROM projects WHERE is_test = 1 OR id LIKE 'proj-%' OR id LIKE 'test-proj-%'");
+  } catch {}
 });
 
 test('Gate 1: ImplementationVerifier passes on valid syntax and criteria', async () => {
@@ -90,6 +93,23 @@ test('Gate 1: ImplementationVerifier fails on syntax error', async () => {
 
   assert.equal(res.status, 'FAILED');
   assert.ok(res.failedRequirements > 0);
+});
+
+test('Gate 1: ImplementationVerifier handles file deletion without failing verification', async () => {
+  const repo = makeTempGitRepo('gate1-del-');
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'node-gate1-del', type: 'module' }));
+  writeFileSync(join(repo, 'active.js'), 'export const active = true;\n');
+
+  const res = await ImplementationVerifier.verifyTask({
+    projectId: testProjectId,
+    workspacePath: repo,
+    prompt: 'Delete obsolete file and keep active.js',
+    taskFiles: ['active.js', 'obsolete.js']
+  });
+
+  assert.equal(res.status, 'PASS');
+  assert.equal(res.failedRequirements, 0);
+  assert.ok(res.verifiedList.some(r => r.requirement === 'File removal: obsolete.js'));
 });
 
 test('Gate 2: SecurityAuditor detects synthetic AWS key and redacts value', async () => {
@@ -150,14 +170,33 @@ test('Gate 2: SecurityAuditor passes on clean code', async () => {
   assert.equal(res.severitySummary.HIGH, 0);
 });
 
+test('Gate 2: SecurityAuditor permits legitimate .sql migrations and .env.example placeholder credentials', async () => {
+  const repo = makeTempGitRepo('gate2-sql-');
+  mkdirSync(join(repo, 'migrations'), { recursive: true });
+  writeFileSync(join(repo, 'migrations', '001_init.up.sql'), 'CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT);\n');
+  writeFileSync(join(repo, 'migrations', '001_init.down.sql'), 'DROP TABLE users;\n');
+  writeFileSync(join(repo, '.env.example'), 'DATABASE_URL=postgres://user:password@localhost:5432/app_db\nJWT_SECRET=change-me-secret-min-32\n');
+
+  const res = await SecurityAuditor.auditWorkspace({
+    projectId: testProjectId,
+    workspacePath: repo,
+    reviewedRevision: 'HEAD',
+    taskFiles: ['migrations/001_init.up.sql', 'migrations/001_init.down.sql', '.env.example']
+  });
+
+  assert.equal(res.status, 'PASS');
+  assert.equal(res.findings.length, 0);
+  assert.equal(res.severitySummary.CRITICAL, 0);
+});
+
 test('Gate 3: Ballo workspace identity mismatch check blocks push', () => {
   const repo = makeTempGitRepo('gate3-ballo-');
   execSync('git remote add origin https://github.com/myorg/CodeOrchestrator.git', { cwd: repo, stdio: 'ignore' });
 
   const balloProjectId = 'proj-ballo-' + Date.now();
   dbRun(
-    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
-     VALUES (?, 'Ballo Project', ?, ?, 'main', '{}')`,
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json, is_test)
+     VALUES (?, 'Ballo Project', ?, ?, 'main', '{}', 1)`,
     [balloProjectId, 'ballo-' + Date.now(), repo]
   );
 
@@ -199,8 +238,8 @@ test('ApprovalService: Keep Local preserves changes and marks workflow completed
 
   const projId = 'proj-keep-local-' + Date.now();
   dbRun(
-    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
-     VALUES (?, 'Keep Local Proj', ?, ?, 'main', '{}')`,
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json, is_test)
+     VALUES (?, 'Keep Local Proj', ?, ?, 'main', '{}', 1)`,
     [projId, 'keep-local-' + Date.now(), repo]
   );
 
@@ -234,8 +273,8 @@ test('ApprovalService: Idempotent decisions & replay protection', async () => {
   const repo = makeTempGitRepo('idempotent-');
   const projId = 'proj-idem-' + Date.now();
   dbRun(
-    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
-     VALUES (?, 'Idempotent Proj', ?, ?, 'main', '{}')`,
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json, is_test)
+     VALUES (?, 'Idempotent Proj', ?, ?, 'main', '{}', 1)`,
     [projId, 'idem-' + Date.now(), repo]
   );
 
@@ -270,8 +309,8 @@ test('REST API: /approvals/pending and /approvals/:id/decide', async () => {
   const repo = makeTempGitRepo('rest-approval-');
   const projId = 'proj-rest-' + Date.now();
   dbRun(
-    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
-     VALUES (?, 'REST Proj', ?, ?, 'main', '{}')`,
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json, is_test)
+     VALUES (?, 'REST Proj', ?, ?, 'main', '{}', 1)`,
     [projId, 'rest-' + Date.now(), repo]
   );
 
@@ -314,8 +353,8 @@ test('WorkflowService: 0 changed files completes cleanly without pushing or manu
   const repo = makeTempGitRepo('workflow-nochanges-');
   const projId = 'proj-nochanges-' + Date.now();
   dbRun(
-    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
-     VALUES (?, 'NoChanges Proj', ?, ?, 'main', '{}')`,
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json, is_test)
+     VALUES (?, 'NoChanges Proj', ?, ?, 'main', '{}', 1)`,
     [projId, 'nochanges-' + Date.now(), repo]
   );
 
@@ -354,8 +393,8 @@ test('GitOperations: 3 valid project git states without blocking local operation
   assert.equal(GitOperations.getGitState(noGitDir), 'LOCAL_NO_GIT');
   const projNoGitId = 'proj-nogit-' + Date.now();
   dbRun(
-    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
-     VALUES (?, 'No Git Proj', ?, ?, 'main', '{}')`,
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json, is_test)
+     VALUES (?, 'No Git Proj', ?, ?, 'main', '{}', 1)`,
     [projNoGitId, 'nogit-' + Date.now(), noGitDir]
   );
   const idNoGit = GitOperations.validateRepositoryIdentity(projNoGitId, noGitDir);
@@ -383,8 +422,8 @@ test('GitOperations & ProjectService: Identity separation never infers Go module
   writeFileSync(join(goDir, 'go.mod'), 'module github.com/original-owner/my-go-module\n\ngo 1.23.0\n');
   const projGoId = 'proj-go-' + Date.now();
   dbRun(
-    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
-     VALUES (?, 'Go Module Proj', ?, ?, 'main', '{}')`,
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json, is_test)
+     VALUES (?, 'Go Module Proj', ?, ?, 'main', '{}', 1)`,
     [projGoId, 'gomod-' + Date.now(), goDir]
   );
 
@@ -411,8 +450,8 @@ test('TaskRecovery: recoverBlockedTask, TaskContextSnapshot, and findRecoverable
   const pId = 'proj-recov-' + Date.now();
   const pSlug = 'recov-' + Date.now();
   dbRun(
-    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
-     VALUES (?, 'Recov Proj', ?, ?, 'main', '{}')`,
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json, is_test)
+     VALUES (?, 'Recov Proj', ?, ?, 'main', '{}', 1)`,
     [pId, pSlug, taskRepo]
   );
 
@@ -483,8 +522,8 @@ test('REST API: /tasks/recoverable, /tasks/:id/recover, and /tasks/:id/context',
   const pId = 'proj-api-recov-' + Date.now();
   const pSlug = 'api-recov-' + Date.now();
   dbRun(
-    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json)
-     VALUES (?, 'API Recov Proj', ?, ?, 'main', '{}')`,
+    `INSERT INTO projects (id, name, slug, workspace_path, default_branch, metadata_json, is_test)
+     VALUES (?, 'API Recov Proj', ?, ?, 'main', '{}', 1)`,
     [pId, pSlug, repo]
   );
   const tId = 'task-api-recov-' + Date.now();

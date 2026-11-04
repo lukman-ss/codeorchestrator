@@ -5,7 +5,8 @@ import {
   splitTextIntoChunks,
   redactSensitive,
   formatSpecificationCard,
-  formatGitReviewCard
+  formatGitReviewCard,
+  formatTaskCard
 } from './notifications.js';
 import {
   downloadAndValidateAttachment,
@@ -61,6 +62,20 @@ export function parseProjectDirective(text) {
   }
 
   return { projectSlug: null, cleanedText: text };
+}
+
+export function parseProjectSwitchIntent(text) {
+  if (!text || typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  const match = trimmed.match(/^(?:(?:set|use|pake|switch(?:\s+to)?)\s+project|set\s+active\s+project)\s*[:=]?\s*[`"']?([a-zA-Z0-9_.-]+)[`"']?[.!?]?$/i);
+  return match ? match[1].trim() : null;
+}
+
+export function extractTaskSubmissionDirective(text) {
+  if (!text || typeof text !== 'string') return null;
+  const match = text.match(/^\s*(?:kirim\s+task|task|run)\s*[:=]\s*([\s\S]+)$/i) ||
+                text.match(/(?:^|\r?\n)\s*(?:kirim\s+task|task|run)\s*[:=]\s*([\s\S]+)$/i);
+  return match ? match[1].trim() : null;
 }
 
 export function extractRepositoryDirective(text) {
@@ -637,6 +652,17 @@ export async function handleMessage(message, client, apiClient, persistence, aut
         });
       }
       targetProjectId = targetProject.id;
+    } else {
+      const channelProj = persistence.getChannelProject(
+        message.guildId,
+        message.channel?.isThread?.() ? message.channel.parentId : message.channelId
+      );
+      if (channelProj) {
+        try {
+          targetProject = await apiClient.getProject(channelProj.project_id);
+          targetProjectId = targetProject?.id || null;
+        } catch {}
+      }
     }
 
     if (targetProject) {
@@ -758,6 +784,71 @@ export async function handleMessage(message, client, apiClient, persistence, aut
     return cardMsg;
   }
 
+  // Project switching intent ("set project <name>", "use project <name>")
+  const switchTarget = parseProjectSwitchIntent(rawPrompt);
+  if (switchTarget) {
+    const project = await apiClient.resolveProject(switchTarget);
+    if (!project) {
+      return await message.reply({
+        content: `❌ **Unknown Project**: Project \`${switchTarget}\` not found. Please verify the project name or slug.`,
+        allowedMentions: { repliedUser: false, parse: [] }
+      });
+    }
+
+    const memberRoles = message.member?.roles?.cache
+      ? Array.from(message.member.roles.cache.keys())
+      : Array.isArray(message.member?.roles)
+      ? message.member.roles
+      : [];
+    if (!auth.isProjectAllowedForUser(userId, memberRoles, project)) {
+      return await message.reply({
+        content: `❌ **Access Denied**: You do not have permission to access project \`${project.slug}\`.`,
+        allowedMentions: { repliedUser: false, parse: [] }
+      });
+    }
+
+    const channelId = message.channel?.isThread?.() ? message.channel.parentId : message.channelId;
+    persistence.setChannelProject({
+      guildId: message.guildId,
+      channelId,
+      projectId: project.id,
+      projectSlug: project.slug,
+      userId
+    });
+
+    let projectConv = persistence.getActiveConversation({
+      guildId: message.guildId,
+      channelId,
+      threadId: message.channel?.isThread?.() ? message.channel.id : null,
+      discordUserId: userId,
+      projectId: project.id
+    });
+    if (!projectConv) {
+      const session = await apiClient.createSession({
+        title: `Project ${project.slug}`,
+        type: 'project',
+        projectId: project.id,
+        userId
+      });
+      projectConv = persistence.createConversation({
+        id: randomUUID(),
+        guildId: message.guildId,
+        channelId,
+        threadId: message.channel?.isThread?.() ? message.channel.id : null,
+        discordUserId: userId,
+        sessionId: session.id,
+        projectId: project.id,
+        conversationType: 'project',
+        status: 'active'
+      });
+    }
+
+    return await message.reply({
+      content: `📁 Active project for this channel set to **${project.name}** (\`${project.slug}\`). You can now dispatch tasks directly via \`task: <instructions>\` or \`/code run\`.`,
+      allowedMentions: { repliedUser: false, parse: [] }
+    });
+  }
+
   const { projectSlug, cleanedText: prompt } = parseProjectDirective(rawPrompt);
 
   // Mention-only message: return helpful greeting
@@ -788,6 +879,91 @@ export async function handleMessage(message, client, apiClient, persistence, aut
       });
     }
     targetProjectId = targetProject.id;
+  } else if (!check.referencedMessageId) {
+    const channelProj = persistence.getChannelProject(
+      message.guildId,
+      message.channel?.isThread?.() ? message.channel.parentId : message.channelId
+    );
+    if (channelProj) {
+      try {
+        targetProject = await apiClient.getProject(channelProj.project_id);
+        targetProjectId = targetProject?.id || null;
+      } catch {}
+    }
+  }
+
+  // Direct task execution directive (task:, run:, kirim task:)
+  const taskPrompt = extractTaskSubmissionDirective(prompt);
+  if (taskPrompt) {
+    let effectiveProject = targetProject;
+    if (!effectiveProject) {
+      const channelProj = persistence.getChannelProject(
+        message.guildId,
+        message.channel?.isThread?.() ? message.channel.parentId : message.channelId
+      );
+      if (channelProj) {
+        try {
+          effectiveProject = await apiClient.getProject(channelProj.project_id);
+        } catch {}
+      }
+    }
+
+    if (!effectiveProject) {
+      return await message.reply({
+        content: '❌ No active project found for this channel. Please specify `project: <name>` or set active project with `set project <name>` or `/code project set`.',
+        allowedMentions: { repliedUser: false, parse: [] }
+      });
+    }
+
+    const memberRoles = message.member?.roles?.cache
+      ? Array.from(message.member.roles.cache.keys())
+      : Array.isArray(message.member?.roles)
+      ? message.member.roles
+      : [];
+    if (!auth.isProjectAllowedForUser(userId, memberRoles, effectiveProject)) {
+      return await message.reply({
+        content: `❌ **Access Denied**: You do not have permission to execute tasks on project \`${effectiveProject.slug}\`.`,
+        allowedMentions: { repliedUser: false, parse: [] }
+      });
+    }
+
+    try {
+      const taskRes = await apiClient.createTask(effectiveProject.id, { prompt: taskPrompt });
+      const taskId = taskRes.id;
+      const initialStatus = taskRes.status || 'queued';
+
+      const initialContent = formatTaskCard(
+        { id: taskId, project_slug: effectiveProject.slug, status: initialStatus, prompt: taskPrompt },
+        { projectSlug: effectiveProject.slug }
+      );
+
+      const trackingNote = `\n_Track with:_ \`/code status id:${taskId}\` _or cancel with:_ \`/code cancel id:${taskId}\``;
+
+      const reply = await message.reply({
+        content: `${initialContent}\n${trackingNote}`,
+        allowedMentions: { repliedUser: false, parse: [] }
+      });
+
+      persistence.saveExecution({
+        id: taskId,
+        kind: 'task',
+        guildId: message.guildId,
+        channelId: message.channel?.isThread?.() ? message.channel.parentId : message.channelId,
+        userId,
+        messageId: reply.id,
+        projectId: effectiveProject.id,
+        projectSlug: effectiveProject.slug,
+        promptSnippet: taskPrompt.slice(0, 100),
+        status: initialStatus
+      });
+
+      return reply;
+    } catch (err) {
+      return await message.reply({
+        content: `❌ **Task Submission Failed**: ${err.message}`,
+        allowedMentions: { repliedUser: false, parse: [] }
+      });
+    }
   }
 
   // Repository mismatch and scope conflict validation
@@ -821,9 +997,18 @@ export async function handleMessage(message, client, apiClient, persistence, aut
   if (!prompt && !targetProjectId) return null;
 
   if (!prompt && targetProject) {
+    const channelId = message.channel?.isThread?.() ? message.channel.parentId : message.channelId;
+    persistence.setChannelProject({
+      guildId: message.guildId,
+      channelId,
+      projectId: targetProjectId,
+      projectSlug: targetProject.slug,
+      userId
+    });
+
     let projectConv = persistence.getActiveConversation({
       guildId: message.guildId,
-      channelId: message.channel?.isThread?.() ? message.channel.parentId : message.channelId,
+      channelId,
       threadId: message.channel?.isThread?.() ? message.channel.id : null,
       discordUserId: userId,
       projectId: targetProjectId

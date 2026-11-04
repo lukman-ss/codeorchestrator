@@ -19,6 +19,17 @@ PRAGMA busy_timeout = 5000;
 
 ---
 
+## Storage Demarcation: SQLite vs Filesystem
+
+The orchestrator strictly enforces separation between structured metadata and filesystem artifacts:
+
+- **Metadata & State (SQLite)**: `data/orchestrator.db` stores only operational records, lifecycle states, session messages, and task events. Source code trees and binary files are never stored as database BLOBs.
+- **Source Code & Working Trees (Filesystem)**: Code repositories and Git worktrees reside strictly in host filesystem paths (`WORKSPACE_ROOT` and `AGENT_WORKTREE_ROOT`).
+- **Prompt Artifacts**: Large prompts and attachments exceeding inline thresholds are offloaded to `data/prompt-artifacts/` with SHA-256 integrity digests and restrictive file permissions (`0600`, directory `0700`), avoiding database bloat and memory pressure.
+- **Decoupled Bridge Store**: The Discord bridge operates an isolated database (`integrations/discord/bridge.db`). The core orchestrator functions completely independently of Discord state.
+
+---
+
 ## Schema Versioning & Migrations
 
 Database migrations are tracked via the `schema_version` table:

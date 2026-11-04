@@ -160,6 +160,7 @@ const runTask = (task) => {
   emitPersisted(task.id, 'task.progress', { state: 'spawned', model: targetModel });
 
   let capturedSession = false;
+  let lastStepFinishReason = null;
 
   child.stdout.on('data', (chunk) => {
     taskLogger.write(chunk);
@@ -184,13 +185,15 @@ const runTask = (task) => {
             callID: obj.part?.callID || obj.callID,
             state: obj.part?.state || obj.state
           });
-        } else if (obj.type === 'step_start') {
+        } else if (obj.type === 'step_start' || obj.type === 'step-start') {
           emitPersisted(task.id, 'task.progress', { step: 'step_start', timestamp: obj.timestamp });
-        } else if (obj.type === 'step_finish') {
+        } else if (obj.type === 'step_finish' || obj.type === 'step-finish') {
+          const reason = obj.part?.reason || obj.reason;
+          if (reason) lastStepFinishReason = reason;
           emitPersisted(task.id, 'task.progress', {
             step: 'step_finish',
-            reason: obj.part?.reason,
-            tokens: obj.part?.tokens
+            reason: reason,
+            tokens: obj.part?.tokens || obj.tokens
           });
         } else if (obj.type === 'text') {
           emitPersisted(task.id, 'task.text', {
@@ -213,8 +216,11 @@ const runTask = (task) => {
   child.on('exit', (code, signal) => {
     logger.info({ component: 'task_queue', event: 'subprocess_exited', taskId: task.id, pid: child.pid, exitCode: code, signal }, 'Task subprocess exited');
     taskLogger.end();
-    const errText = signal ? `Terminated by signal ${signal}` : (code !== 0 ? `Exit code ${code}` : null);
-    finish(task, (code === 0 && !signal) ? 'completed' : 'failed', errText, child.pid, code, signal);
+    const isCompleted = (code === 0 && !signal) || (!signal && lastStepFinishReason === 'stop');
+    const errText = signal
+      ? `Terminated by signal ${signal}`
+      : (!isCompleted ? (code !== 0 ? `Exit code ${code}` : 'Task failed') : null);
+    finish(task, isCompleted ? 'completed' : 'failed', errText, child.pid, isCompleted ? 0 : code, signal);
   });
 };
 
@@ -276,7 +282,8 @@ const finish = (task, status, error, pid, code, signal = null) => {
       taskId: id,
       projectId: taskObj.project_id,
       prompt: taskObj.prompt,
-      baseline
+      baseline,
+      autoRepair: true
     }).catch(err => logger.error({ component: 'task_queue', taskId: id, err, event: 'workflow_start_error' }, 'Workflow execution error'));
   }
 
@@ -339,8 +346,11 @@ export const shutdownAll = async (timeoutMs = (Number(process.env.TASK_KILL_GRAC
   logger.info({ component: 'task_queue', event: 'shutdown_tasks_complete' }, 'Task processes shut down');
 };
 
-export const recoverRunning = () => {
-  const rows = dbGet("SELECT t.*, p.slug FROM tasks t LEFT JOIN projects p ON t.project_id=p.id WHERE t.execution_status='running'");
+export const recoverRunning = (filterTaskId = null) => {
+  const query = filterTaskId
+    ? "SELECT t.*, p.slug FROM tasks t LEFT JOIN projects p ON t.project_id=p.id WHERE t.execution_status='running' AND t.id = ?"
+    : "SELECT t.*, p.slug FROM tasks t LEFT JOIN projects p ON t.project_id=p.id WHERE t.execution_status='running'";
+  const rows = filterTaskId ? dbGet(query, [filterTaskId]) : dbGet(query);
   for (const row of rows) {
     if (row.pid && typeof row.pid === 'number') {
       try {

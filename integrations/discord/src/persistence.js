@@ -141,6 +141,17 @@ export class PersistenceStore {
       CREATE INDEX IF NOT EXISTS idx_approval_msgs_task ON discord_approval_messages(task_id);
       CREATE INDEX IF NOT EXISTS idx_approval_msgs_job ON discord_approval_messages(job_id);
       CREATE INDEX IF NOT EXISTS idx_approval_msgs_message ON discord_approval_messages(message_id);
+
+      CREATE TABLE IF NOT EXISTS discord_channel_projects (
+        guild_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        project_slug TEXT NOT NULL,
+        set_by_user_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (guild_id, channel_id)
+      );
     `);
 
     try {
@@ -586,6 +597,30 @@ export class PersistenceStore {
 
   getApprovalMessage(messageId) {
     return this.db.prepare('SELECT * FROM discord_approval_messages WHERE message_id = ?').get(messageId);
+  }
+
+  setChannelProject({ guildId, channelId, projectId, projectSlug, userId = null }) {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO discord_channel_projects
+      (guild_id, channel_id, project_id, project_slug, set_by_user_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    `);
+    stmt.run(guildId, channelId, projectId, projectSlug, userId);
+    return this.getChannelProject(guildId, channelId);
+  }
+
+  getChannelProject(guildId, channelId) {
+    if (!channelId) return null;
+    const row = this.db.prepare(
+      'SELECT * FROM discord_channel_projects WHERE guild_id = ? AND channel_id = ?'
+    ).get(guildId, channelId);
+    return row || null;
+  }
+
+  clearChannelProject(guildId, channelId) {
+    this.db.prepare(
+      'DELETE FROM discord_channel_projects WHERE guild_id = ? AND channel_id = ?'
+    ).run(guildId, channelId);
   }
 
   getApprovalMessageByApprovalId(approvalId) {

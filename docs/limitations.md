@@ -7,6 +7,9 @@ This document details current architectural, runtime, and operational boundaries
 - **Single-Node Execution**: Orchestrator runs as a single Node.js instance. It does not support multi-node clustering or distributed task coordination.
 - **SQLite Concurrency**: SQLite operates in WAL mode with a busy timeout (`5000ms`). High-concurrency writes may face transaction queueing.
 - **Filesystem Locality**: Workspaces must reside on a filesystem directly accessible to the orchestrator host. Network mounts (NFS/SMB) must support POSIX file locking.
+- **No In-Database File Storage (No BLOBs)**: SQLite exclusively stores operational metadata and JSON payloads. Working trees, files, and Git revisions exist purely on the filesystem. Large prompt artifacts are written to `data/prompt-artifacts/`.
+- **No Task Staging / Draft Lifecycle**: Tasks lack an internal draft/staging state machine. Submitting a task immediately enqueues it. Pre-flight staging or iterative draft compilation must occur externally.
+- **Single-Repository Workspace Authority**: The execution plane operates on exactly one canonical repository workspace per task. Cross-repository atomic commits or multi-repo worktrees are not supported; `ProjectContextResolver` halts cross-repo scope conflicts (`SCOPE_CONFLICT`).
 - **Subprocess Dependency**: Task execution requires the `opencode` CLI installed on the local system path.
 - **WebSocket Streaming**: Real-time events rely solely on WebSockets (`ws://`). No Server-Sent Events (SSE) or long-polling fallbacks are implemented.
 

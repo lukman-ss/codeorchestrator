@@ -73,6 +73,18 @@ export const data = new SlashCommandBuilder()
       )
       .addSubcommand(sub =>
         sub
+          .setName('set')
+          .setDescription('Set active project for this channel')
+          .addStringOption(opt =>
+            opt
+              .setName('project')
+              .setDescription('Project name, slug, or ID')
+              .setRequired(true)
+              .setAutocomplete(true)
+          )
+      )
+      .addSubcommand(sub =>
+        sub
           .setName('info')
           .setDescription('Display detailed information about a project')
           .addStringOption(opt =>
@@ -273,16 +285,16 @@ export const data = new SlashCommandBuilder()
       .setDescription('Submit a simple coding task to a project workspace')
       .addStringOption(opt =>
         opt
-          .setName('project')
-          .setDescription('Target project name, slug, or ID')
-          .setRequired(true)
-          .setAutocomplete(true)
-      )
-      .addStringOption(opt =>
-        opt
           .setName('prompt')
           .setDescription('Task instructions')
           .setRequired(true)
+      )
+      .addStringOption(opt =>
+        opt
+          .setName('project')
+          .setDescription('Target project name, slug, or ID (optional, defaults to channel project)')
+          .setRequired(false)
+          .setAutocomplete(true)
       )
   )
   .addSubcommand(sub =>
@@ -292,8 +304,8 @@ export const data = new SlashCommandBuilder()
       .addStringOption(opt =>
         opt
           .setName('project')
-          .setDescription('Target project name, slug, or ID')
-          .setRequired(true)
+          .setDescription('Target project name, slug, or ID (optional, defaults to channel project)')
+          .setRequired(false)
           .setAutocomplete(true)
       )
       .addStringOption(opt =>
@@ -564,6 +576,8 @@ export async function execute(interaction, eventListener = null) {
     switch (commandKey) {
       case 'project:import':
         return await handleProjectImport(interaction, userId, memberRoles);
+      case 'project:set':
+        return await handleProjectSet(interaction, userId, memberRoles);
       case 'project:info':
         return await handleProjectInfo(interaction, userId, memberRoles);
       case 'project:repair':
@@ -626,6 +640,13 @@ async function handleProjectImport(interaction, userId, memberRoles) {
 
   try {
     const project = await apiClient.importProject({ directory, name, userId });
+    persistence.setChannelProject({
+      guildId: interaction.guildId,
+      channelId: interaction.channelId,
+      projectId: project.id,
+      projectSlug: project.slug,
+      userId
+    });
     const gitStatus = project.repo_url || project.repository_url ? 'Configured' : 'Not configured';
     const lines = [
       '✅ **Workspace Registered Successfully!**',
@@ -634,7 +655,8 @@ async function handleProjectImport(interaction, userId, memberRoles) {
       `• **ID**: \`${project.id}\``,
       `• **Workspace**: \`${project.slug}\``,
       `• **Git**: ${gitStatus}`,
-      `• **Default Model**: \`${project.default_model || '9router/ayce-combo'}\``
+      `• **Default Model**: \`${project.default_model || '9router/ayce-combo'}\``,
+      `• **Active Project**: Bound to this channel`
     ];
     if (project.metadata?.stack) {
       lines.push(`• **Technology**: ${project.metadata.stack}`);
@@ -646,6 +668,38 @@ async function handleProjectImport(interaction, userId, memberRoles) {
   } catch (err) {
     return safeEditReply(interaction, formatErrorPayload(err, { type: 'project_import_error' }));
   }
+}
+
+async function handleProjectSet(interaction, userId, memberRoles) {
+  const projectInput = interaction.options.getString('project', true);
+  const project = await apiClient.resolveProject(projectInput);
+
+  if (!project) {
+    return safeEditReply(interaction, {
+      content: `❌ Project \`${projectInput}\` not found in CodeOrchestrator.`,
+      allowedMentions: safeMentions
+    }, { type: 'project_not_found' });
+  }
+
+  if (!auth.isProjectAllowedForUser(userId, memberRoles, project)) {
+    return safeEditReply(interaction, {
+      content: `❌ **Access Denied**: You do not have permission to access project \`${project.slug}\`.`,
+      allowedMentions: safeMentions
+    }, { type: 'auth_denied' });
+  }
+
+  persistence.setChannelProject({
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    projectId: project.id,
+    projectSlug: project.slug,
+    userId
+  });
+
+  return safeEditReply(interaction, {
+    content: `📁 Channel active project set to **${project.name}** (\`${project.slug}\`). Subsequent tasks, jobs, and chat messages in this channel will default to this project.`,
+    allowedMentions: safeMentions
+  }, { type: 'project_set' });
 }
 
 async function handleProjectInfo(interaction, userId, memberRoles) {
@@ -757,7 +811,13 @@ async function handleProjectRepair(interaction, userId, memberRoles) {
 }
 
 async function handlePromptStart(interaction, userId, memberRoles) {
-  const projectInput = interaction.options.getString('project');
+  let projectInput = interaction.options.getString('project');
+  if (!projectInput) {
+    const channelProj = persistence.getChannelProject(interaction.guildId, interaction.channelId);
+    if (channelProj) {
+      projectInput = channelProj.project_slug || channelProj.project_id;
+    }
+  }
   let targetProjectId = null;
   let targetProjectSlug = null;
 
@@ -1282,6 +1342,14 @@ export async function handleButton(interaction) {
         }, { type: 'project_timeout' });
       }
 
+      persistence.setChannelProject({
+        guildId: interaction.guildId,
+        channelId: interaction.channelId,
+        projectId: finalResult.id,
+        projectSlug: finalResult.slug,
+        userId
+      });
+
       const successLines = [
         '✅ **Project Created Successfully!**',
         '',
@@ -1291,7 +1359,8 @@ export async function handleButton(interaction) {
         `• **Workspace**: \`${finalResult.slug}\``,
         `• **Git Remote**: ${finalResult.repo_url ? `\`${finalResult.repo_url}\`` : 'Not configured'}`,
         `• **Branch**: \`${finalResult.default_branch || 'main'}\``,
-        `• **Default Model**: \`${finalResult.default_model}\``
+        `• **Default Model**: \`${finalResult.default_model}\``,
+        `• **Active Project**: Bound to this channel`
       ];
       if (finalResult.metadata?.stack) {
         successLines.push(`• **Technology**: ${finalResult.metadata.stack}`);
@@ -1359,7 +1428,13 @@ export async function handleButton(interaction) {
 }
 
 async function handleApprovals(interaction, userId, memberRoles) {
-  const projectInput = interaction.options.getString('project');
+  let projectInput = interaction.options.getString('project');
+  if (!projectInput) {
+    const channelProj = persistence.getChannelProject(interaction.guildId, interaction.channelId);
+    if (channelProj) {
+      projectInput = channelProj.project_slug || channelProj.project_id;
+    }
+  }
   let projectId = null;
   if (projectInput) {
     const proj = await apiClient.resolveProject(projectInput);
@@ -1563,7 +1638,13 @@ async function handleProjects(interaction, userId, memberRoles) {
 }
 
 async function handleSessions(interaction, userId, memberRoles) {
-  const projectInput = interaction.options.getString('project');
+  let projectInput = interaction.options.getString('project');
+  if (!projectInput) {
+    const channelProj = persistence.getChannelProject(interaction.guildId, interaction.channelId);
+    if (channelProj) {
+      projectInput = channelProj.project_slug || channelProj.project_id;
+    }
+  }
   const page = interaction.options.getInteger('page') || 1;
   const pageSize = 5;
 
@@ -2037,7 +2118,21 @@ async function handleResume(interaction, userId, memberRoles) {
 }
 
 async function handleRun(interaction, userId, memberRoles, eventListener) {
-  const projectInput = interaction.options.getString('project', true);
+  let projectInput = interaction.options.getString('project');
+  if (!projectInput) {
+    const channelProj = persistence.getChannelProject(interaction.guildId, interaction.channelId);
+    if (channelProj) {
+      projectInput = channelProj.project_slug || channelProj.project_id;
+    }
+  }
+
+  if (!projectInput) {
+    return safeEditReply(interaction, {
+      content: '❌ No project specified and no active project set for this channel. Use `/code project set <name>` or specify `project:`.',
+      allowedMentions: safeMentions
+    }, { type: 'run_error' });
+  }
+
   const prompt = interaction.options.getString('prompt', true);
 
   const project = await apiClient.resolveProject(projectInput);
@@ -2086,7 +2181,21 @@ async function handleRun(interaction, userId, memberRoles, eventListener) {
 }
 
 async function handleJob(interaction, userId, memberRoles, eventListener) {
-  const projectInput = interaction.options.getString('project', true);
+  let projectInput = interaction.options.getString('project');
+  if (!projectInput) {
+    const channelProj = persistence.getChannelProject(interaction.guildId, interaction.channelId);
+    if (channelProj) {
+      projectInput = channelProj.project_slug || channelProj.project_id;
+    }
+  }
+
+  if (!projectInput) {
+    return safeEditReply(interaction, {
+      content: '❌ No project specified and no active project set for this channel. Use `/code project set <name>` or specify `project:`.',
+      allowedMentions: safeMentions
+    }, { type: 'job_error' });
+  }
+
   let prompt = interaction.options.getString('prompt') || '';
   const attachment = interaction.options.getAttachment('attachment');
 
@@ -2379,6 +2488,9 @@ async function handleHelp(interaction) {
     '',
     '`/code project import directory:<dir> [name:<name>]`',
     'Register an existing directory under workspace root as a project.',
+    '',
+    '`/code project set project:<name|slug|id>`',
+    'Set active project for this channel so subsequent tasks and chat default to it.',
     '',
     '`/code project info project:<name|slug|id>`',
     'View detailed project metadata, Git status, session counts, and stack.',

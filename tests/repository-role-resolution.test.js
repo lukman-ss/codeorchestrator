@@ -399,6 +399,18 @@ test('27. Idempotent audit persistence: calling persistRepositoryReferences mult
 });
 
 test('28. Task recovery unblocks false repository mismatch tasks without re-executing OpenCode', async () => {
+  // Ensure pending approval exists for test task
+  const existingPending = dbGetOne(
+    "SELECT id FROM git_approval_requests WHERE task_id = 'fcf39f35-a8a8-41d6-b0c7-f086510f8a29' AND status = 'pending'"
+  );
+  if (!existingPending) {
+    dbRun(
+      `INSERT INTO git_approval_requests (id, task_id, project_id, repository_identity, target_branch, reviewed_revision, status, created_at)
+       VALUES (?, 'fcf39f35-a8a8-41d6-b0c7-f086510f8a29', '2a380312-60c7-4fe5-9046-a49ecb487cbd', 'git@github.com:lukman-ss/ballo-todo.git', 'main', 'HEAD', 'pending', datetime('now'))`,
+      [randomUUID()]
+    );
+  }
+
   // Test taskId fcf39f35-a8a8-41d6-b0c7-f086510f8a29 has execution completed
   const res = await recoverRepositoryMismatchTask('fcf39f35-a8a8-41d6-b0c7-f086510f8a29');
   assert.equal(res.recovered, true);

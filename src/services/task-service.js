@@ -81,9 +81,10 @@ export const createTask = (projectId, { prompt, model, sessionId }) => {
 
 export const isTaskRecoverable = (task) => {
   if (!task) return false;
-  const isBlocked = task.workflow_status === 'blocked' || task.status === 'blocked' || task.workflow_status === 'interrupted' || task.status === 'interrupted';
-  const executionFinished = task.execution_status === 'completed' || task.exit_code === 0;
-  return Boolean(isBlocked && executionFinished);
+  const isBlocked = task.workflow_status === 'blocked' || task.status === 'blocked' ||
+                    task.workflow_status === 'interrupted' || task.status === 'interrupted' ||
+                    task.workflow_status === 'failed' || task.status === 'failed';
+  return Boolean(isBlocked);
 };
 
 export const findRecoverableTask = ({ taskId, sessionId, projectId, projectSlug } = {}) => {
@@ -95,7 +96,7 @@ export const findRecoverableTask = ({ taskId, sessionId, projectId, projectSlug 
 
   if (sessionId) {
     const tasks = dbGet(
-      "SELECT * FROM tasks WHERE session_id = ? AND (workflow_status = 'blocked' OR status = 'blocked' OR workflow_status = 'interrupted' OR status = 'interrupted') AND (execution_status = 'completed' OR exit_code = 0) ORDER BY created_at DESC",
+      "SELECT * FROM tasks WHERE session_id = ? AND (workflow_status = 'blocked' OR status = 'blocked' OR workflow_status = 'interrupted' OR status = 'interrupted' OR workflow_status = 'failed' OR status = 'failed') ORDER BY created_at DESC",
       [sessionId]
     );
     if (tasks.length > 0) return tasks[0];
@@ -109,7 +110,7 @@ export const findRecoverableTask = ({ taskId, sessionId, projectId, projectSlug 
 
   if (resolvedProjectId) {
     const tasks = dbGet(
-      "SELECT * FROM tasks WHERE project_id = ? AND (workflow_status = 'blocked' OR status = 'blocked' OR workflow_status = 'interrupted' OR status = 'interrupted') AND (execution_status = 'completed' OR exit_code = 0) ORDER BY created_at DESC",
+      "SELECT * FROM tasks WHERE project_id = ? AND (workflow_status = 'blocked' OR status = 'blocked' OR workflow_status = 'interrupted' OR status = 'interrupted' OR workflow_status = 'failed' OR status = 'failed') ORDER BY created_at DESC",
       [resolvedProjectId]
     );
     if (tasks.length === 1) return tasks[0];
@@ -157,7 +158,8 @@ export const recoverBlockedTask = async (taskId, options = {}) => {
   const workflowResult = await WorkflowService.startCompletionWorkflow({
     taskId: task.id,
     projectId: project.id,
-    prompt: task.prompt
+    prompt: task.prompt,
+    autoRepair: true
   });
 
   const refreshedTask = getTask(taskId);

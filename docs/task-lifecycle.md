@@ -57,6 +57,12 @@ The task scheduler (`src/services/task-queue.js`) enforces two layers of concurr
 
 When a running task completes or fails, `schedule()` is invoked automatically to dispatch the next eligible task from the queue.
 
+## Task Staging and Drafting Boundaries
+
+- **No Internal Staging/Draft State**: The orchestrator state machine starts directly at `queued`. There is no intermediate `draft` or `staged` state in SQLite.
+- **Immediate Dispatch Contention**: Calling `POST /projects/:id/tasks` immediately registers the task and exposes it to the worker dispatch loop.
+- **Client/Bridge Responsibility**: Local-first drafting, multi-turn prompt accumulation, and pre-flight validation prior to execution must be managed by external tooling (CLI, client UI, or Discord bridge buffer) before dispatching to the orchestrator API.
+
 ## Disk Space Protection
 
 Before enqueuing any task (`POST /projects/:id/tasks`), the orchestrator evaluates local filesystem metrics via `df -m .`:

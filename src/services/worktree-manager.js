@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENT_WORKTREE_ROOT } from '../config.js';
+import { AGENT_WORKTREE_ROOT, GIT_USER_NAME, GIT_USER_EMAIL } from '../config.js';
 import logger from '../logger.js';
 
 export class WorktreeManager {
@@ -25,8 +25,8 @@ export class WorktreeManager {
   static ensureGitInit(canonicalPath) {
     if (!this.isGitRepo(canonicalPath)) {
       execSync('git init', { cwd: canonicalPath, stdio: 'pipe' });
-      execSync('git config user.name "Coding Orchestrator"', { cwd: canonicalPath, stdio: 'pipe' });
-      execSync('git config user.email "orchestrator@local"', { cwd: canonicalPath, stdio: 'pipe' });
+      execSync(`git config user.name "${GIT_USER_NAME}"`, { cwd: canonicalPath, stdio: 'pipe' });
+      execSync(`git config user.email "${GIT_USER_EMAIL}"`, { cwd: canonicalPath, stdio: 'pipe' });
       execSync('git add -A', { cwd: canonicalPath, stdio: 'pipe' });
       try {
         execSync('git commit -m "chore: initial commit by orchestrator"', { cwd: canonicalPath, stdio: 'pipe' });

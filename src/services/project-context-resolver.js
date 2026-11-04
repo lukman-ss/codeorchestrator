@@ -293,9 +293,12 @@ export class ProjectContextResolver {
 
     lines.push('');
     lines.push('Execution Policy:');
+    lines.push('- Proactively implement the complete solution: write real code, create all necessary files, and implement tests. Do NOT stop at plans, explanations, or placeholder comments.');
     lines.push('- All file modifications MUST occur strictly within the target workspace.');
     lines.push('- Starter repositories, templates, and framework dependencies are read-only references; do NOT modify them.');
     lines.push('- Preserve Go module declarations and project-internal imports without automated renaming.');
+    lines.push('- Run local build, format, and verification tests (e.g. `go test ./...`, `go vet ./...`, `npm test`) to guarantee zero compilation errors and 100% passing tests before finishing.');
+    lines.push('- For configuration templates, only edit `.env.example` with dummy placeholders (never commit secrets or real credentials).');
     lines.push('- Do NOT perform automated git push; modifications will go through human Git review.');
     lines.push('');
     lines.push('---');
