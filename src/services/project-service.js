@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { WORKSPACE_ROOT } from '../config.js';
 import { dbGet, dbRun, dbGetOne } from '../database/db.js';
 import { GitOperations } from './git-operations.js';
+import { ModelRegistry } from './model-registry.js';
 
 export const generateSlug = (name) => {
   if (!name || typeof name !== 'string') return '';
@@ -357,7 +358,7 @@ export const createProject = ({
     }
 
     const id = randomUUID();
-    const effectiveModel = defaultModel || '9router/ayce-combo';
+    const effectiveModel = defaultModel || ModelRegistry.getDefaultModel() || null;
     const effectiveUserId = userId || creatorUserId || null;
     const finalMetadata = {
       ...(metadata || {}),
@@ -439,8 +440,8 @@ export const listProjects = (options = {}) => {
   });
 };
 
-export const getProject = (id) => {
-  const row = dbGetOne('SELECT * FROM projects WHERE id = ?', [id]);
+export const getProject = (idOrSlug) => {
+  const row = dbGetOne('SELECT * FROM projects WHERE id = ? OR slug = ?', [idOrSlug, idOrSlug]);
   if (!row) throw new Error('Project not found');
   row.repository_url = row.repository_url || row.repo_url || null;
   row.repo_url = row.repo_url || row.repository_url || null;
@@ -452,19 +453,19 @@ export const getProject = (id) => {
   return row;
 };
 
-export const updateProject = (id, patch) => {
-  getProject(id);
+export const updateProject = (idOrSlug, patch) => {
+  const current = getProject(idOrSlug);
   const set = [];
   const vals = [];
   if ('name' in patch) { set.push('name = ?'); vals.push(patch.name); }
   if ('description' in patch) { set.push('description = ?'); vals.push(patch.description); }
   if ('defaultModel' in patch) { set.push('default_model = ?'); vals.push(patch.defaultModel); }
-  if ('isTest' in patch) { set.push('is_test = ?'); vals.push(patch.isTest ? 1 : 0); }
+  if ('default_model' in patch) { set.push('default_model = ?'); vals.push(patch.default_model); }
   if ('metadata' in patch) { set.push('metadata_json = ?'); vals.push(JSON.stringify(patch.metadata)); }
-  if (set.length === 0) return getProject(id);
-  vals.push(id);
+  if (set.length === 0) return current;
+  vals.push(current.id);
   dbRun(`UPDATE projects SET ${set.join(', ')}, updated_at = datetime('now') WHERE id = ?`, vals);
-  return getProject(id);
+  return getProject(current.id);
 };
 
 export const importProject = (slugOrDir, { name, isTest = 0, userId } = {}) => {

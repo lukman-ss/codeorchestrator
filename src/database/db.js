@@ -33,7 +33,7 @@ const baseTables = [
     repo_url TEXT,
     repository_url TEXT,
     default_branch TEXT,
-    default_model TEXT DEFAULT '9router/ayce-combo',
+    default_model TEXT,
     repository_provider TEXT,
     creator_user_id TEXT,
     is_test INTEGER NOT NULL DEFAULT 0,
@@ -97,6 +97,11 @@ const baseTables = [
     result_json TEXT,
     error TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE TABLE IF NOT EXISTS orchestrator_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`
 ];

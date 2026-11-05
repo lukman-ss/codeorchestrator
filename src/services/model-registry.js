@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 import { dbGet, dbGetOne, dbRun } from '../database/db.js';
 import { OPENCODE_BIN, DEFAULT_MODEL } from '../config.js';
+import { SettingsService } from './settings-service.js';
 
 export class ModelRegistry {
   static _cache = {
@@ -101,12 +102,12 @@ export class ModelRegistry {
       const dbEntries = dbGet('SELECT id FROM model_registry WHERE availability_status != ?', ['unavailable']);
       if (dbEntries && dbEntries.length > 0) {
         discoveredIds = dbEntries.map(e => e.id);
-      } else {
+      } else if (DEFAULT_MODEL) {
         discoveredIds = [DEFAULT_MODEL];
       }
     }
 
-    if (discoveredIds.length === 0) {
+    if (discoveredIds.length === 0 && DEFAULT_MODEL) {
       discoveredIds = [DEFAULT_MODEL];
     }
 
@@ -244,12 +245,35 @@ export class ModelRegistry {
   }
 
   /**
+   * Get dynamic default model:
+   * 1. Check orchestrator_settings SQLite table.
+   * 2. Check process.env.DEFAULT_MODEL.
+   * 3. Discover models and take the first available.
+   */
+  static getDefaultModel() {
+    try {
+      const persisted = SettingsService.get('default_model');
+      if (persisted) return persisted;
+    } catch {}
+
+    if (process.env.DEFAULT_MODEL) return process.env.DEFAULT_MODEL;
+
+    const models = this.discoverModels();
+    if (models && models.length > 0) {
+      const first = typeof models[0] === 'string' ? models[0] : models[0].id;
+      if (first) return first;
+    }
+
+    return '';
+  }
+
+  /**
    * Parse model strings into clean baseModel and variant.
-   * e.g., '9router/ayce-combo#high' => { baseModel: '9router/ayce-combo', variant: 'high' }
    */
   static parseModelString(raw) {
     if (!raw || typeof raw !== 'string') {
-      return { baseModel: DEFAULT_MODEL, variant: null };
+      const def = this.getDefaultModel();
+      return { baseModel: def || DEFAULT_MODEL, variant: null };
     }
     const clean = raw.trim();
     const hashIndex = clean.indexOf('#');

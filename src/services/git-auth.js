@@ -1,13 +1,47 @@
 // ponytail: stdlib git credential and SSH detection; upgrade to libgit2 bindings if granular multi-key management needed.
 import { execSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 /**
+ * Parse ~/.ssh/config for Host aliases, hostnames, and identity keys.
+ */
+export function parseSshConfig(configPath = join(homedir(), '.ssh/config')) {
+  if (!existsSync(configPath)) return [];
+  try {
+    const content = readFileSync(configPath, 'utf8');
+    const lines = content.split('\n');
+    const hosts = [];
+    let curHost = null;
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const [key, ...vals] = line.split(/\s+/);
+      const val = vals.join(' ');
+
+      if (key.toLowerCase() === 'host') {
+        curHost = { hosts: vals, hostName: null, user: null, identityFile: null };
+        hosts.push(curHost);
+      } else if (curHost) {
+        if (key.toLowerCase() === 'hostname') curHost.hostName = val;
+        else if (key.toLowerCase() === 'user') curHost.user = val;
+        else if (key.toLowerCase() === 'identityfile') {
+          curHost.identityFile = val.startsWith('~') ? val.replace('~', homedir()) : val;
+        }
+      }
+    }
+    return hosts;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Detect Git authentication state: SSH key connectivity vs token/login.
  */
-export function detectGitAuth({ sshKeyPath, timeout = 4000, testSsh = true } = {}) {
+export function detectGitAuth({ sshKeyPath, timeout = 4000, testSsh = true, host } = {}) {
   const result = {
     connected: false,
     authType: 'none', // 'ssh' | 'token' | 'none'
@@ -16,6 +50,7 @@ export function detectGitAuth({ sshKeyPath, timeout = 4000, testSsh = true } = {
     gitEmail: '',
     sshUser: null,
     sshKeyPath: sshKeyPath || null,
+    sshAliases: parseSshConfig(),
     hasToken: Boolean(process.env.GITHUB_TOKEN || process.env.GH_TOKEN)
   };
 
@@ -31,37 +66,36 @@ export function detectGitAuth({ sshKeyPath, timeout = 4000, testSsh = true } = {
     result.gitEmail = process.env.GIT_USER_EMAIL || '';
   }
 
-  // 2. Discover candidate SSH key if none specified
+  // 2. Discover candidate SSH key: check ssh_config aliases first, then ~/.ssh
   if (!result.sshKeyPath) {
-    const sshDir = join(homedir(), '.ssh');
-    if (existsSync(sshDir)) {
-      try {
-        const files = readdirSync(sshDir);
-        const keys = files.filter(f => f.startsWith('id_') && !f.endsWith('.pub') && !f.endsWith('.old'));
-        const preferred = keys.find(k => k.includes('orchestrator') || k.includes('ed25519')) || keys[0];
-        if (preferred) {
-          result.sshKeyPath = join(sshDir, preferred);
-        }
-      } catch {}
+    const configAlias = result.sshAliases.find(a => a.identityFile && existsSync(a.identityFile));
+    if (configAlias) {
+      result.sshKeyPath = configAlias.identityFile;
+    } else {
+      const sshDir = join(homedir(), '.ssh');
+      if (existsSync(sshDir)) {
+        try {
+          const files = readdirSync(sshDir);
+          const keys = files.filter(f => f.startsWith('id_') && !f.endsWith('.pub') && !f.endsWith('.old'));
+          const preferred = keys.find(k => k.includes('orchestrator') || k.includes('ed25519')) || keys[0];
+          if (preferred) {
+            result.sshKeyPath = join(sshDir, preferred);
+          }
+        } catch {}
+      }
     }
   }
 
   // 3. Test SSH connection
   if (testSsh) {
-    try {
-      const keyOpt = result.sshKeyPath ? `-i "${result.sshKeyPath}"` : '';
-      const cmd = `ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=3 ${keyOpt} git@github.com`;
-      execSync(cmd, { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'] });
-    } catch (err) {
-      const combined = (err.stdout || '') + (err.stderr || '') + (err.message || '');
-      const match = combined.match(/Hi\s+([a-zA-Z0-9_-]+)!/i);
-      if (match) {
-        result.connected = true;
-        result.authType = 'ssh';
-        result.sshUser = match[1];
-        result.status = `CONNECTED (SSH: ${match[1]})`;
-        return result;
-      }
+    const targetHost = host || (result.sshAliases.some(a => a.hosts.includes('github-coding')) ? 'git@github-coding' : 'git@github.com');
+    const testResult = testSshConnection(result.sshKeyPath, targetHost, timeout);
+    if (testResult.ok && testResult.user) {
+      result.connected = true;
+      result.authType = 'ssh';
+      result.sshUser = testResult.user;
+      result.status = `CONNECTED (SSH: ${testResult.user})`;
+      return result;
     }
   }
 
@@ -86,14 +120,14 @@ export function detectGitAuth({ sshKeyPath, timeout = 4000, testSsh = true } = {
 /**
  * Test SSH authentication against remote git host.
  */
-export function testSshConnection(keyPath, host = 'git@github.com') {
+export function testSshConnection(keyPath, host = 'git@github.com', timeout = 5000) {
   if (keyPath && !existsSync(keyPath)) {
     return { ok: false, user: null, message: `Key file not found: ${keyPath}` };
   }
   try {
     const keyOpt = keyPath ? `-i "${keyPath}" -o IdentitiesOnly=yes` : '';
     const cmd = `ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=3 ${keyOpt} ${host}`;
-    execSync(cmd, { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
+    execSync(cmd, { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'] });
     return { ok: true, user: null, message: 'SSH handshake succeeded' };
   } catch (err) {
     const combined = (err.stdout || '') + (err.stderr || '') + (err.message || '');

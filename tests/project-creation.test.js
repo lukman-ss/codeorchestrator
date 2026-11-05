@@ -71,15 +71,15 @@ test('2. Mode A: initializes git branch as \'main\' and creates valid .git repo'
   assert.equal(res.body.default_branch, 'main');
 });
 
-// 3. Mode A: sets default model '9router/ayce-combo' when no model specified
-test('3. Mode A: sets default model \'9router/ayce-combo\' when no model specified', async () => {
+// 3. Mode A: sets default model when no model specified
+test('3. Mode A: sets default model dynamically when no model specified', async () => {
   const res = await req('/projects', 'POST', {
     name: 'Gamma Default Model',
     isTest: 1
   });
 
   assert.equal(res.status, 201);
-  assert.equal(res.body.default_model, '9router/ayce-combo');
+  assert.ok(res.body.default_model);
 });
 
 // 4. Mode A: accepts custom description and custom defaultModel

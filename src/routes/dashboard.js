@@ -4,6 +4,7 @@ import { KnowledgeService } from '../services/knowledge-service.js';
 import { ModelRouter } from '../services/model-router.js';
 import { ModelRegistry } from '../services/model-registry.js';
 import { detectGitAuth, testSshConnection } from '../services/git-auth.js';
+import { SettingsService } from '../services/settings-service.js';
 
 export default async function dashboardRoutes(app) {
   // Prometheus metrics endpoint
@@ -402,6 +403,38 @@ export default async function dashboardRoutes(app) {
       const host = req.body?.host || 'git@github.com';
       const test = testSshConnection(keyPath, host);
       reply.send(test);
+    } catch (err) {
+      reply.code(500).send({ error: err.message });
+    }
+  });
+
+  app.get('/api/settings', async (req, reply) => {
+    try {
+      const persisted = SettingsService.getAll();
+      reply.send({
+        auto_approve_level: persisted.auto_approve_level || process.env.AUTO_APPROVE_LEVEL || 'OFF',
+        default_model: persisted.default_model || process.env.DEFAULT_MODEL || ModelRegistry.getDefaultModel(),
+        reasoning_effort: persisted.reasoning_effort || process.env.REASONING_EFFORT || 'medium',
+        task_timeout_seconds: Number(persisted.task_timeout_seconds || process.env.TASK_TIMEOUT_SECONDS || 3600),
+        max_concurrent_tasks: Number(persisted.max_concurrent_tasks || process.env.MAX_CONCURRENT_TASKS || 2),
+        max_repair_attempts: Number(persisted.max_repair_attempts || process.env.MAX_REPAIR_ATTEMPTS || 2),
+        log_level: persisted.log_level || process.env.LOG_LEVEL || 'info',
+        auto_repair_enabled: persisted.auto_repair_enabled !== undefined ? persisted.auto_repair_enabled === 'true' : true
+      });
+    } catch (err) {
+      reply.code(500).send({ error: err.message });
+    }
+  });
+
+  app.post('/api/settings', async (req, reply) => {
+    try {
+      const { key, value, settings } = req.body || {};
+      if (settings && typeof settings === 'object') {
+        SettingsService.setMultiple(settings);
+      } else if (key) {
+        SettingsService.set(key, value);
+      }
+      reply.send({ success: true, settings: SettingsService.getAll() });
     } catch (err) {
       reply.code(500).send({ error: err.message });
     }

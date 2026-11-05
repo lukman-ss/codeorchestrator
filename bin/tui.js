@@ -123,8 +123,8 @@ export class TerminalUi {
     // Enhanced Settings State
     this.gitAuth = null;
     this.isCheckingGitAuth = false;
-    this.discoveredModels = ['9router/ayce-combo', '9router/ag/claude-sonnet-4-6', '9router/ag/gemini-3.8-flash-high'];
-    this.settingsDefaultModel = process.env.DEFAULT_MODEL || '9router/ayce-combo';
+    this.discoveredModels = [];
+    this.settingsDefaultModel = process.env.DEFAULT_MODEL || '';
     this.reasoningEffort = (process.env.REASONING_EFFORT || 'medium').toLowerCase();
     this.taskTimeoutSeconds = Number(process.env.TASK_TIMEOUT_SECONDS || 3600);
     this.maxConcurrentTasks = Number(process.env.MAX_CONCURRENT_TASKS || 2);
@@ -204,6 +204,9 @@ export class TerminalUi {
     });
 
     await this.silentRefresh();
+    this.loadPersistentSettings().then(() => this.render()).catch(() => {});
+    this.detectGitAuth(true).then(() => this.render()).catch(() => {});
+    this.fetchModels().then(() => this.render()).catch(() => {});
     if (this.tab === 'projects' && !this.hasInitializedProjectSelection) {
       this.selected = this.getTabSelected('projects');
       this.hasInitializedProjectSelection = true;
@@ -381,7 +384,7 @@ export class TerminalUi {
         {
           id: 'default_model',
           label: 'AI Model',
-          value: this.settingsDefaultModel || modelOpts[0] || '9router/ayce-combo',
+          value: this.settingsDefaultModel || modelOpts[0] || '(none)',
           type: 'cycle',
           options: modelOpts,
           description: 'Base language model utilized by orchestrator worker agents for coding workflows.'
@@ -594,12 +597,18 @@ export class TerminalUi {
         rightLines.push(`  ${C.dim}Slug:${C.reset}       ${curProject.slug}`);
         rightLines.push(`  ${C.dim}ID:${C.reset}         ${curProject.id}`);
         rightLines.push(`  ${C.dim}Branch:${C.reset}     ${curProject.default_branch || 'main'}`);
-        rightLines.push(`  ${C.dim}Model:${C.reset}      ${curProject.default_model || 'auto'}`);
+        let pMetadata = {};
+        try { pMetadata = typeof curProject.metadata_json === 'string' ? JSON.parse(curProject.metadata_json) : (curProject.metadata_json || {}); } catch {}
+        const pModel = curProject.default_model || this.settingsDefaultModel;
+        const pEffort = (pMetadata.effort || this.reasoningEffort || 'medium').toUpperCase();
+        rightLines.push(`  ${C.dim}Model:${C.reset}      ${C.cyan}${pModel}${C.reset}`);
+        rightLines.push(`  ${C.dim}Effort:${C.reset}     ${C.magenta}${pEffort}${C.reset}`);
         rightLines.push(`  ${C.dim}Workspace:${C.reset}  ${curProject.workspace_path || 'N/A'}`);
         rightLines.push(`  ${C.dim}Remote:${C.reset}     ${curProject.repo_url || curProject.repository_url || '(local only)'}`);
         rightLines.push('');
         rightLines.push(`${C.bold}  Interactive Actions:${C.reset}`);
         rightLines.push(`  ${C.green}[Enter]${C.reset}   Set as active project`);
+        rightLines.push(`  ${C.cyan}[m]${C.reset}       Configure project AI model & effort`);
         rightLines.push(`  ${C.cyan}[c / n]${C.reset}   Create new project`);
         rightLines.push(`  ${C.blue}[i]${C.reset}       Import existing directory`);
         rightLines.push(`  ${C.yellow}[v]${C.reset}       Validate workspace health`);
@@ -1294,6 +1303,11 @@ export class TerminalUi {
       return this.openConfigureGitModal();
     }
 
+    // Projects: Configure AI Model & Effort Override (m)
+    if (this.tab === 'projects' && str === 'm') {
+      return this.openProjectModelModal();
+    }
+
     // Contextual Action: View / Validate
     if (str === 'v') {
       if (this.tab === 'projects') return this.validateWorkspace();
@@ -1411,6 +1425,7 @@ export class TerminalUi {
             const curIdx = opts.indexOf(this.settingsDefaultModel);
             this.settingsDefaultModel = opts[(curIdx === -1 ? 0 : curIdx + 1) % opts.length];
             this.status = `AI Model set to: ${this.settingsDefaultModel}`;
+            this.persistSetting('default_model', this.settingsDefaultModel);
           }
           return this.render();
         } else if (cur.id === 'reasoning_effort') {
@@ -1419,6 +1434,7 @@ export class TerminalUi {
           this.reasoningEffort = tiers[(curIdx === -1 ? 0 : curIdx + 1) % tiers.length];
           process.env.REASONING_EFFORT = this.reasoningEffort;
           this.status = `Reasoning effort set to: ${this.reasoningEffort.toUpperCase()}`;
+          this.persistSetting('reasoning_effort', this.reasoningEffort);
           return this.render();
         } else if (cur.id === 'task_timeout') {
           const timeouts = [900, 1800, 3600, 7200];
@@ -1426,6 +1442,7 @@ export class TerminalUi {
           this.taskTimeoutSeconds = timeouts[(curIdx === -1 ? 0 : curIdx + 1) % timeouts.length];
           process.env.TASK_TIMEOUT_SECONDS = String(this.taskTimeoutSeconds);
           this.status = `Task timeout set to: ${this.getTimeoutLabel(this.taskTimeoutSeconds)}`;
+          this.persistSetting('task_timeout_seconds', this.taskTimeoutSeconds);
           return this.render();
         } else if (cur.id === 'max_concurrent') {
           const limits = [1, 2, 4];
@@ -1433,6 +1450,7 @@ export class TerminalUi {
           this.maxConcurrentTasks = limits[(curIdx === -1 ? 0 : curIdx + 1) % limits.length];
           process.env.MAX_CONCURRENT_TASKS = String(this.maxConcurrentTasks);
           this.status = `Max concurrent tasks set to: ${this.maxConcurrentTasks}`;
+          this.persistSetting('max_concurrent_tasks', this.maxConcurrentTasks);
           return this.render();
         } else if (cur.id === 'max_repair') {
           const retries = [1, 2, 3];
@@ -1440,6 +1458,7 @@ export class TerminalUi {
           this.maxRepairAttempts = retries[(curIdx === -1 ? 0 : curIdx + 1) % retries.length];
           process.env.MAX_REPAIR_ATTEMPTS = String(this.maxRepairAttempts);
           this.status = `Max repair retries set to: ${this.maxRepairAttempts}`;
+          this.persistSetting('max_repair_attempts', this.maxRepairAttempts);
           return this.render();
         } else if (cur.id === 'log_level') {
           const levels = ['info', 'debug', 'warn'];
@@ -1447,6 +1466,7 @@ export class TerminalUi {
           this.logLevel = levels[(curIdx === -1 ? 0 : curIdx + 1) % levels.length];
           process.env.LOG_LEVEL = this.logLevel;
           this.status = `System log level set to: ${this.logLevel.toUpperCase()}`;
+          this.persistSetting('log_level', this.logLevel);
           return this.render();
         } else if (cur.id === 'auto_approve') {
           const tiers = ['OFF', 'LOW', 'MEDIUM', 'HIGH', 'MAX'];
@@ -1454,6 +1474,7 @@ export class TerminalUi {
           this.autoApproveLevel = tiers[(curIdx === -1 ? 0 : curIdx + 1) % tiers.length];
           const disp = this.autoApproveLevel === 'MAX' ? 'MAX (NO LIMIT)' : this.autoApproveLevel;
           this.status = `Auto-approve policy set to: ${disp} (push)`;
+          this.persistSetting('auto_approve_level', this.autoApproveLevel);
           if (this.autoApproveLevel !== 'OFF') {
             await this.processAutoApprovals();
           }
@@ -1461,6 +1482,7 @@ export class TerminalUi {
         } else if (cur.id === 'auto_repair') {
           this.autoRepairEnabled = this.autoRepairEnabled === false ? true : false;
           this.status = `Auto-repair on failure is now ${this.autoRepairEnabled ? 'ENABLED' : 'DISABLED'}`;
+          this.persistSetting('auto_repair_enabled', this.autoRepairEnabled);
           return this.render();
         } else if (cur.id === 'active_project') {
           this.switchTab(0);
@@ -1725,15 +1747,20 @@ export class TerminalUi {
           this.status = 'Error: No active project selected. Select one first.';
           return this.render();
         }
-        this.status = `Submitting task to ${this.activeProject.slug}...`;
+        let pMetadata = {};
+        try { pMetadata = typeof this.activeProject.metadata_json === 'string' ? JSON.parse(this.activeProject.metadata_json) : (this.activeProject.metadata_json || {}); } catch {}
+        const targetModel = this.activeProject.default_model || this.settingsDefaultModel;
+        const targetEffort = pMetadata.effort || this.reasoningEffort;
+
+        this.status = `Submitting task to ${this.activeProject.slug} (${targetModel}#${targetEffort})...`;
         this.render();
         try {
           const res = await this.api(`/projects/${this.activeProject.id}/tasks`, {
             method: 'POST',
             body: {
               prompt,
-              model: this.settingsDefaultModel,
-              effort: this.reasoningEffort
+              model: targetModel,
+              effort: targetEffort
             }
           });
           this.status = `Task submitted: ${res.id}`;
@@ -1759,7 +1786,12 @@ export class TerminalUi {
           this.status = 'Error: No active project selected.';
           return this.render();
         }
-        this.status = `Submitting job to ${this.activeProject.slug}...`;
+        let pMetadata = {};
+        try { pMetadata = typeof this.activeProject.metadata_json === 'string' ? JSON.parse(this.activeProject.metadata_json) : (this.activeProject.metadata_json || {}); } catch {}
+        const targetModel = this.activeProject.default_model || this.settingsDefaultModel;
+        const targetEffort = pMetadata.effort || this.reasoningEffort;
+
+        this.status = `Submitting job to ${this.activeProject.slug} (${targetModel}#${targetEffort})...`;
         this.render();
         try {
           const res = await this.api('/jobs', {
@@ -1767,8 +1799,8 @@ export class TerminalUi {
             body: {
               project_id: this.activeProject.id,
               prompt,
-              model: this.settingsDefaultModel,
-              effort: this.reasoningEffort
+              model: targetModel,
+              effort: targetEffort
             }
           });
           this.status = `Job scheduled: ${res.id}`;
@@ -1839,9 +1871,19 @@ export class TerminalUi {
     try {
       if (this.api) {
         try {
+          if (forceRefresh) {
+            const disc = await this.api('/api/models/discover', { method: 'POST' });
+            if (disc && Array.isArray(disc.models) && disc.models.length > 0) {
+              this.discoveredModels = disc.models.map(m => (typeof m === 'string' ? m : m.id));
+              if (!this.settingsDefaultModel && this.discoveredModels[0]) {
+                this.settingsDefaultModel = this.discoveredModels[0];
+              }
+              return this.discoveredModels;
+            }
+          }
           const res = await this.api('/api/models/registry');
           if (Array.isArray(res) && res.length > 0) {
-            this.discoveredModels = res.map(m => m.id);
+            this.discoveredModels = res.map(m => (typeof m === 'string' ? m : m.id));
             if (!this.settingsDefaultModel && this.discoveredModels[0]) {
               this.settingsDefaultModel = this.discoveredModels[0];
             }
@@ -1861,10 +1903,7 @@ export class TerminalUi {
         }
       }
     } catch {}
-    if (!this.discoveredModels || this.discoveredModels.length === 0) {
-      this.discoveredModels = ['9router/ayce-combo', '9router/ag/claude-sonnet-4-6', '9router/ag/gemini-3.8-flash-high'];
-    }
-    return this.discoveredModels;
+    return this.discoveredModels || [];
   }
 
   openGitAccountModal() {
@@ -1994,6 +2033,81 @@ export class TerminalUi {
         }
         await this.detectGitAuth(false);
         this.openGitAccountModal();
+      }
+    );
+  }
+
+  async loadPersistentSettings() {
+    try {
+      if (this.api) {
+        const s = await this.api('/api/settings');
+        if (s && typeof s === 'object') {
+          if (s.auto_approve_level) this.autoApproveLevel = s.auto_approve_level;
+          if (s.default_model) this.settingsDefaultModel = s.default_model;
+          if (s.reasoning_effort) this.reasoningEffort = s.reasoning_effort;
+          if (s.task_timeout_seconds) this.taskTimeoutSeconds = Number(s.task_timeout_seconds);
+          if (s.max_concurrent_tasks) this.maxConcurrentTasks = Number(s.max_concurrent_tasks);
+          if (s.max_repair_attempts) this.maxRepairAttempts = Number(s.max_repair_attempts);
+          if (s.log_level) this.logLevel = s.log_level;
+          if (s.auto_repair_enabled !== undefined) this.autoRepairEnabled = Boolean(s.auto_repair_enabled);
+          return s;
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  async persistSetting(key, value) {
+    try {
+      if (this.api) {
+        await this.api('/api/settings', {
+          method: 'POST',
+          body: { key, value }
+        });
+      }
+    } catch {}
+  }
+
+  openProjectModelModal() {
+    const items = this.getFilteredItems();
+    const curProject = items[this.selected] || this.activeProject;
+    if (!curProject) {
+      this.status = 'Select a project to configure AI model & effort';
+      return this.render();
+    }
+    let pMetadata = {};
+    try { pMetadata = typeof curProject.metadata_json === 'string' ? JSON.parse(curProject.metadata_json) : (curProject.metadata_json || {}); } catch {}
+    const curModel = curProject.default_model || this.settingsDefaultModel;
+    const curEffort = pMetadata.effort || this.reasoningEffort || 'medium';
+
+    this.openFormModal(
+      `Configure AI Model for ${curProject.slug}`,
+      [
+        { key: 'model', label: 'Default AI Model:', value: curModel },
+        { key: 'effort', label: 'Reasoning Effort (low/medium/high/inherit):', value: curEffort }
+      ],
+      async (formData) => {
+        const modelVal = formData.model?.trim() || curModel;
+        const effortVal = (formData.effort?.trim() || curEffort).toLowerCase();
+        try {
+          await this.api(`/projects/${curProject.id}`, {
+            method: 'PATCH',
+            body: {
+              default_model: modelVal,
+              metadata: {
+                ...pMetadata,
+                effort: effortVal === 'inherit' ? null : effortVal
+              }
+            }
+          });
+          curProject.default_model = modelVal;
+          curProject.metadata_json = JSON.stringify({ ...pMetadata, effort: effortVal === 'inherit' ? null : effortVal });
+          this.status = `Updated model for ${curProject.slug}: ${modelVal} (${effortVal})`;
+          await this.silentRefresh();
+        } catch (e) {
+          this.status = `Failed to update project: ${e.message}`;
+        }
+        this.render();
       }
     );
   }
