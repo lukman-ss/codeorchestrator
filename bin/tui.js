@@ -85,9 +85,9 @@ export class TerminalUi {
     this.api = api;
     this.getActiveProject = getActiveProject;
     this.setActiveProject = setActiveProject;
-    this.tabIndex = 0; // 0: Projects, 1: Tasks, 2: Approvals, 3: System
-    this.tabs = ['projects', 'tasks', 'approvals', 'system'];
-    this.tabSelected = { projects: null, tasks: 0, approvals: 0, system: 0 };
+    this.tabIndex = 0; // 0: Projects, 1: Tasks, 2: Approvals, 3: System, 4: Settings
+    this.tabs = ['projects', 'tasks', 'approvals', 'system', 'settings'];
+    this.tabSelected = { projects: null, tasks: 0, approvals: 0, system: 0, settings: 0 };
     this.selected = 0;
     this.filter = '';
     this.filtering = false;
@@ -345,6 +345,56 @@ export class TerminalUi {
       if (!q) return this.approvals;
       return this.approvals.filter(a => a.id.toLowerCase().includes(q) || (a.project_id || '').toLowerCase().includes(q));
     }
+    if (this.tab === 'settings') {
+      const items = [
+        {
+          id: 'auto_approve',
+          label: 'Auto-Approve Policy',
+          value: this.autoApproveLevel,
+          type: 'cycle',
+          options: ['OFF', 'LOW', 'MEDIUM', 'HIGH', 'MAX'],
+          description: 'Tier policy determining which verified Gate 1-2 changes are automatically committed and pushed to upstream git remotes without manual review.'
+        },
+        {
+          id: 'active_project',
+          label: 'Active Project',
+          value: this.activeSlug || '(none)',
+          type: 'action',
+          description: 'Default target workspace for tasks, jobs, and CLI operations.'
+        },
+        {
+          id: 'default_model',
+          label: 'Default Model',
+          value: this.settingsDefaultModel || process.env.DEFAULT_MODEL || '9router/ayce-combo#high',
+          type: 'cycle',
+          options: ['9router/ayce-combo#high', '9router/ayce-combo#low', '9router/ayce-combo'],
+          description: 'Default language model utilized by orchestrator worker agents for coding workflows.'
+        },
+        {
+          id: 'auto_repair',
+          label: 'Auto-Repair on Failure',
+          value: this.autoRepairEnabled !== false ? 'ENABLED (2 attempts)' : 'DISABLED',
+          type: 'toggle',
+          description: 'Automatically attempts self-repair iterations when Gate 1 (tests/syntax) or Gate 2 fails.'
+        },
+        {
+          id: 'multi_remote',
+          label: 'Multi-Remote Routing',
+          value: 'PARALLEL (ALL REMOTES)',
+          type: 'info',
+          description: 'Pushes verified commits to multiple configured git remotes (origin, upstream, etc.) concurrently via Promise.allSettled.'
+        },
+        {
+          id: 'discord_notifications',
+          label: 'Discord Notifications',
+          value: 'EVENT BUS & WEBSOCKET',
+          type: 'info',
+          description: 'Broadcasts task status, completion cards, and Gate 3 interactive reviews to connected Discord channels.'
+        }
+      ];
+      if (!q) return items;
+      return items.filter(it => it.label.toLowerCase().includes(q) || it.value.toLowerCase().includes(q) || it.description.toLowerCase().includes(q));
+    }
     return [];
   }
 
@@ -405,7 +455,8 @@ export class TerminalUi {
       { id: 'projects', label: `1. Projects (${this.projects.length})` },
       { id: 'tasks', label: `2. Tasks (${this.tasks.length})` },
       { id: 'approvals', label: `3. Approvals (${this.approvals.length})` },
-      { id: 'system', label: '4. System' }
+      { id: 'system', label: '4. System' },
+      { id: 'settings', label: '5. Settings' }
     ];
 
     const tabSegments = tabDefs.map((t, idx) => {
@@ -658,7 +709,7 @@ export class TerminalUi {
       rightLines.push('');
       rightLines.push(`${C.bold}  Interactive Shortcuts:${C.reset}`);
       rightLines.push(`  ${C.cyan}Tab / Shift-Tab${C.reset} : Next / Previous Tab`);
-      rightLines.push(`  ${C.cyan}1, 2, 3, 4${C.reset}      : Direct Tab Jump`);
+      rightLines.push(`  ${C.cyan}1, 2, 3, 4, 5${C.reset}   : Direct Tab Jump`);
       rightLines.push(`  ${C.cyan}↑ / ↓ or j / k${C.reset}  : Item Selection`);
       rightLines.push(`  ${C.cyan}/${C.reset}              : Search Filter`);
       rightLines.push(`  ${C.cyan}c / n${C.reset}          : Create New Project`);
@@ -671,6 +722,56 @@ export class TerminalUi {
       rightLines.push(`  ${C.cyan}r${C.reset}              : Force Refresh Data`);
       rightLines.push(`  ${C.cyan}?${C.reset}              : Shortcuts Help Overlay`);
       rightLines.push(`  ${C.cyan}q${C.reset}              : Quit TUI`);
+    } else if (this.tab === 'settings') {
+      if (items.length > 0 && this.selected >= items.length) {
+        this.selected = items.length - 1;
+      }
+      leftLines.push(`${C.bold}${C.cyan}  SETTINGS & PREFERENCES${C.reset}`);
+      leftLines.push(`  ${C.dim}SETTING                 | VALUE${C.reset}`);
+
+      items.forEach((item, idx) => {
+        const isSel = idx === this.selected;
+        const cur = isSel ? `${C.cyan}▸${C.reset}` : ' ';
+        const nameCol = fit(item.label, 23);
+        let valBadge = item.value;
+        if (item.id === 'auto_approve') {
+          valBadge = item.value === 'OFF' ? `${C.red}OFF${C.reset}` : `${C.green}${item.value}${C.reset}`;
+        } else if (item.id === 'auto_repair') {
+          valBadge = item.value.startsWith('ENABLED') ? `${C.green}${item.value}${C.reset}` : `${C.red}${item.value}${C.reset}`;
+        } else {
+          valBadge = `${C.white}${fit(item.value, 20)}${C.reset}`;
+        }
+        leftLines.push(`${cur} ${isSel ? C.bold : ''}${nameCol}${C.reset} | ${valBadge}`);
+      });
+
+      const curSetting = items[this.selected];
+      if (curSetting) {
+        rightLines.push(`${C.bold}${C.yellow}  SETTING: ${curSetting.label}${C.reset}`);
+        rightLines.push(`  ${C.dim}Current Value:${C.reset} ${C.bold}${C.white}${curSetting.value}${C.reset}`);
+        rightLines.push('');
+        rightLines.push(`${C.bold}  Description:${C.reset}`);
+        const descLines = wrapText(curSetting.description, rightWidth - 6);
+        for (const dl of descLines) {
+          rightLines.push(`  ${dl}`);
+        }
+        rightLines.push('');
+        if (curSetting.options) {
+          rightLines.push(`${C.bold}  Available Tiers / Options:${C.reset}`);
+          for (const opt of curSetting.options) {
+            const isCur = opt === curSetting.value;
+            rightLines.push(`  ${isCur ? C.green + '● ' + opt + ' (active)' + C.reset : C.dim + '○ ' + opt + C.reset}`);
+          }
+          rightLines.push('');
+        }
+        rightLines.push(`${C.bold}  Actions:${C.reset}`);
+        if (curSetting.type === 'cycle' || curSetting.type === 'toggle') {
+          rightLines.push(`  ${C.cyan}[Enter] or [Space]${C.reset} : Cycle / Toggle value`);
+        } else if (curSetting.id === 'active_project') {
+          rightLines.push(`  ${C.cyan}[Enter]${C.reset} : Jump to Projects tab to select workspace`);
+        } else {
+          rightLines.push(`  ${C.dim}(Configuration governed by system / environment)${C.reset}`);
+        }
+      }
     }
 
     return { leftLines, rightLines };
@@ -689,6 +790,9 @@ export class TerminalUi {
     if (this.tab === 'approvals') {
       const hotkeyLvl = this.autoApproveLevel === 'MAX' ? 'MAX=NO LIMIT' : this.autoApproveLevel;
       hotkeys = `[a] Auto-Approve (${hotkeyLvl})  [p] Push  [k] Keep  [x] Reject  [d] Diff  [/] Search`;
+    }
+    if (this.tab === 'settings') {
+      hotkeys = '[Enter/Space] Change Value  [↑↓] Move  [1-5] Tab  [?] Help  [q] Quit';
     }
 
     const maxHotkeysLen = Math.max(10, cols - 6);
@@ -995,12 +1099,12 @@ export class TerminalUi {
 
     // Tab Navigation
     if (key.name === 'tab') {
-      const nextIdx = (this.tabIndex + (key.shift ? -1 : 1) + 4) % 4;
+      const nextIdx = (this.tabIndex + (key.shift ? -1 : 1) + this.tabs.length) % this.tabs.length;
       this.switchTab(nextIdx);
       return this.render();
     }
     if (str === '`') {
-      const prevIdx = (this.tabIndex - 1 + 4) % 4;
+      const prevIdx = (this.tabIndex - 1 + this.tabs.length) % this.tabs.length;
       this.switchTab(prevIdx);
       return this.render();
     }
@@ -1008,6 +1112,7 @@ export class TerminalUi {
     if (str === '2') { this.switchTab(1); return this.render(); }
     if (str === '3') { this.switchTab(2); return this.render(); }
     if (str === '4') { this.switchTab(3); return this.render(); }
+    if (str === '5') { this.switchTab(4); return this.render(); }
 
     // List Selection Navigation
     if (key.name === 'up' || (str === 'k' && this.tab !== 'approvals')) {
@@ -1042,9 +1147,10 @@ export class TerminalUi {
         scrollOffset: 0,
         lines: [
           'Tab / `         : Next tab (Tab) / Previous tab (`)',
-          '1, 2, 3, 4      : Jump to tab (Projects, Tasks, Approvals, Sys)',
+          '1, 2, 3, 4, 5   : Jump to tab (Projects, Tasks, Approvals, Sys, Settings)',
           '↑/↓ or j/k      : Navigate items in list',
-          'Enter           : Activate project (tab 1) / View task details (tab 2)',
+          'Enter           : Activate (tab 1) / View logs (tab 2) / Toggle setting (tab 5)',
+          'Space           : Toggle / cycle setting value (tab 5)',
           '/               : Instant search filter',
           'c / n           : Create new project form (tab 1)',
           'i               : Import existing directory as project (tab 1)',
@@ -1077,8 +1183,8 @@ export class TerminalUi {
     if (str === 't') return this.triggerTaskModal();
     if (str === 'j') return this.triggerJobModal();
 
-    // Contextual Action: Enter
-    if (key.name === 'return') return this.handleAction();
+    // Contextual Action: Enter or Space
+    if (key.name === 'return' || (str === ' ' && this.tab === 'settings')) return this.handleAction();
 
     // Projects: Create New Project (c or n)
     if (this.tab === 'projects' && (str === 'c' || str === 'n')) {
@@ -1195,6 +1301,35 @@ export class TerminalUi {
       }
     } else if (this.tab === 'tasks' && items.length > 0) {
       return this.viewTaskDetails();
+    } else if (this.tab === 'settings' && items.length > 0) {
+      const cur = items[this.selected];
+      if (cur) {
+        if (cur.id === 'auto_approve') {
+          const tiers = ['OFF', 'LOW', 'MEDIUM', 'HIGH', 'MAX'];
+          const curIdx = tiers.indexOf(this.autoApproveLevel);
+          this.autoApproveLevel = tiers[(curIdx === -1 ? 0 : curIdx + 1) % tiers.length];
+          const disp = this.autoApproveLevel === 'MAX' ? 'MAX (NO LIMIT)' : this.autoApproveLevel;
+          this.status = `Auto-approve policy set to: ${disp} (push)`;
+          if (this.autoApproveLevel !== 'OFF') {
+            await this.processAutoApprovals();
+          }
+          return this.render();
+        } else if (cur.id === 'auto_repair') {
+          this.autoRepairEnabled = this.autoRepairEnabled === false ? true : false;
+          this.status = `Auto-repair on failure is now ${this.autoRepairEnabled ? 'ENABLED' : 'DISABLED'}`;
+          return this.render();
+        } else if (cur.id === 'default_model') {
+          const models = ['9router/ayce-combo#high', '9router/ayce-combo#low', '9router/ayce-combo'];
+          const curIdx = models.indexOf(cur.value);
+          this.settingsDefaultModel = models[(curIdx === -1 ? 0 : curIdx + 1) % models.length];
+          this.status = `Default model set to: ${this.settingsDefaultModel}`;
+          return this.render();
+        } else if (cur.id === 'active_project') {
+          this.switchTab(0);
+          this.status = 'Select a project and press [Enter] to activate';
+          return this.render();
+        }
+      }
     }
   }
 

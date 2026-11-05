@@ -69,8 +69,8 @@ test('TUI unit: key navigation cycles selected index and tabs', () => {
   assert.equal(ui.tab, 'projects');
 
   ui.handleKey('`', {});
-  assert.equal(ui.tabIndex, 3); // wrap-around left to system tab
-  assert.equal(ui.tab, 'system');
+  assert.equal(ui.tabIndex, 4); // wrap-around left to settings tab
+  assert.equal(ui.tab, 'settings');
 
   ui.handleKey('', { name: 'tab' });
   assert.equal(ui.tabIndex, 0); // wrap-around right to projects tab
@@ -477,4 +477,53 @@ test('TUI unit: auto-approval 5-tier policy (OFF|LOW|MEDIUM|HIGH|MAX=NO LIMIT) a
   await ui.handleKey('a', { name: 'a' });
   assert.equal(ui.autoApproveLevel, 'OFF');
   assert.equal(ui.autoApprove, false);
+});
+
+test('TUI unit: settings tab navigation, rendering, and interactive toggles', async () => {
+  const ui = new TerminalUi({
+    api: async () => {},
+    getActiveProject: () => 'ballo',
+    setActiveProject: () => {}
+  });
+
+  // Jump to tab 5 via shortcut '5'
+  ui.handleKey('5', {});
+  assert.equal(ui.tabIndex, 4);
+  assert.equal(ui.tab, 'settings');
+
+  // Verify list of settings
+  const items = ui.getFilteredItems();
+  assert.ok(items.length >= 5);
+  assert.equal(items[0].id, 'auto_approve');
+  assert.equal(items[1].id, 'active_project');
+  assert.equal(items[2].id, 'default_model');
+  assert.equal(items[3].id, 'auto_repair');
+
+  // Test body rendering
+  const panes = ui.renderBodyPanes(30, 48, 20);
+  assert.ok(panes.leftLines.some(l => l.includes('SETTINGS & PREFERENCES')));
+  assert.ok(panes.leftLines.some(l => l.includes('Auto-Approve Policy')));
+  assert.ok(panes.rightLines.some(l => l.includes('SETTING: Auto-Approve Policy')));
+  assert.ok(panes.rightLines.some(l => l.includes('Available Tiers / Options:')));
+
+  // Test Enter / Space on auto_approve cycles tier
+  assert.equal(ui.autoApproveLevel, 'OFF');
+  await ui.handleAction();
+  assert.equal(ui.autoApproveLevel, 'LOW');
+  assert.match(ui.status, /Auto-approve policy set to: LOW/);
+
+  // Navigate down to auto_repair
+  ui.selected = 3; // auto_repair
+  assert.equal(ui.autoRepairEnabled, undefined); // default enabled
+  await ui.handleAction();
+  assert.equal(ui.autoRepairEnabled, false);
+  assert.match(ui.status, /DISABLED/);
+
+  await ui.handleAction();
+  assert.equal(ui.autoRepairEnabled, true);
+  assert.match(ui.status, /ENABLED/);
+
+  // Test footer hotkeys in settings tab
+  const footer = ui.renderFooter(80);
+  assert.match(footer, /Change Value/);
 });
