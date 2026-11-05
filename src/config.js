@@ -32,7 +32,7 @@ export const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || DEFAULT_WORKSPACE;
 export const SESSION_RUNTIME_ROOT = process.env.SESSION_RUNTIME_ROOT || resolve(ORCHESTRATOR_ROOT, 'data/session-runtime');
 export const DATABASE_PATH = process.env.DATABASE_PATH || resolve(ORCHESTRATOR_ROOT, 'data/orchestrator.db');
 
-export const DEFAULT_MODEL = process.env.DEFAULT_MODEL || '9router/ayce-combo';
+export const DEFAULT_MODEL = process.env.DEFAULT_MODEL || '';
 export const MAX_PROMPT_LENGTH = Math.max(1000000, Number(process.env.MAX_PROMPT_LENGTH || 1000000));
 
 export const API_AUTH_TOKEN = process.env.ORCHESTRATOR_API_TOKEN || '';
