@@ -493,13 +493,19 @@ test('TUI unit: settings tab navigation, rendering, and interactive toggles', as
 
   // Verify list of settings
   const items = ui.getFilteredItems();
-  assert.ok(items.length >= 5);
-  assert.equal(items[0].id, 'auto_approve');
-  assert.equal(items[1].id, 'active_project');
-  assert.equal(items[2].id, 'default_model');
-  assert.equal(items[3].id, 'auto_repair');
+  assert.ok(items.length >= 10);
+  assert.equal(items[0].id, 'git_account');
+  assert.equal(items[1].id, 'default_model');
+  assert.equal(items[2].id, 'fetch_models');
+  assert.equal(items[3].id, 'reasoning_effort');
+  assert.equal(items[4].id, 'task_timeout');
+  assert.equal(items[5].id, 'max_concurrent');
+  assert.equal(items[6].id, 'max_repair');
+  assert.equal(items[7].id, 'log_level');
+  assert.equal(items[8].id, 'auto_approve');
 
   // Test body rendering
+  ui.selected = 8; // auto_approve
   const panes = ui.renderBodyPanes(30, 48, 20);
   assert.ok(panes.leftLines.some(l => l.includes('SETTINGS & PREFERENCES')));
   assert.ok(panes.leftLines.some(l => l.includes('Auto-Approve Policy')));
@@ -512,16 +518,51 @@ test('TUI unit: settings tab navigation, rendering, and interactive toggles', as
   assert.equal(ui.autoApproveLevel, 'LOW');
   assert.match(ui.status, /Auto-approve policy set to: LOW/);
 
-  // Navigate down to auto_repair
-  ui.selected = 3; // auto_repair
-  assert.equal(ui.autoRepairEnabled, undefined); // default enabled
+  // Test reasoning effort cycle (index 3)
+  ui.selected = 3;
+  assert.equal(ui.reasoningEffort, 'medium');
   await ui.handleAction();
-  assert.equal(ui.autoRepairEnabled, false);
-  assert.match(ui.status, /DISABLED/);
+  assert.equal(ui.reasoningEffort, 'high');
+  assert.match(ui.status, /Reasoning effort set to: HIGH/);
 
+  // Test task timeout cycle (index 4)
+  ui.selected = 4;
+  assert.equal(ui.taskTimeoutSeconds, 3600);
   await ui.handleAction();
-  assert.equal(ui.autoRepairEnabled, true);
-  assert.match(ui.status, /ENABLED/);
+  assert.equal(ui.taskTimeoutSeconds, 7200);
+  assert.match(ui.status, /Task timeout set to: 2h/);
+
+  // Test max concurrent tasks cycle (index 5)
+  ui.selected = 5;
+  assert.equal(ui.maxConcurrentTasks, 2);
+  await ui.handleAction();
+  assert.equal(ui.maxConcurrentTasks, 4);
+  assert.match(ui.status, /Max concurrent tasks set to: 4/);
+
+  // Test max repair retries cycle (index 6)
+  ui.selected = 6;
+  assert.equal(ui.maxRepairAttempts, 2);
+  await ui.handleAction();
+  assert.equal(ui.maxRepairAttempts, 3);
+  assert.match(ui.status, /Max repair retries set to: 3/);
+
+  // Test log level cycle (index 7)
+  ui.selected = 7;
+  assert.equal(ui.logLevel, 'info');
+  await ui.handleAction();
+  assert.equal(ui.logLevel, 'debug');
+  assert.match(ui.status, /System log level set to: DEBUG/);
+
+  // Test Git Account modal (index 0)
+  ui.selected = 0;
+  await ui.handleAction();
+  assert.ok(ui.modal);
+  assert.equal(ui.modal.title, 'Git Account & Authentication');
+  assert.ok(ui.modal.lines.some(l => l.includes('Authentication Options')));
+
+  // Test closing modal
+  await ui.handleKey('', { name: 'escape' });
+  assert.equal(ui.modal, null);
 
   // Test footer hotkeys in settings tab
   const footer = ui.renderFooter(80);

@@ -2,6 +2,8 @@ import { dbGet, dbGetOne } from '../database/db.js';
 import { getGlobalRunning, getDispatchQueue, getDiskStats } from '../services/task-queue.js';
 import { KnowledgeService } from '../services/knowledge-service.js';
 import { ModelRouter } from '../services/model-router.js';
+import { ModelRegistry } from '../services/model-registry.js';
+import { detectGitAuth, testSshConnection } from '../services/git-auth.js';
 
 export default async function dashboardRoutes(app) {
   // Prometheus metrics endpoint
@@ -369,6 +371,37 @@ export default async function dashboardRoutes(app) {
           lastCheckedAt: m.last_checked_at
         };
       }));
+    } catch (err) {
+      reply.code(500).send({ error: err.message });
+    }
+  });
+
+  app.post('/api/models/discover', async (req, reply) => {
+    try {
+      const models = ModelRegistry.discoverModels({ forceRefresh: true });
+      reply.send({ count: models.length, models });
+    } catch (err) {
+      reply.code(500).send({ error: err.message });
+    }
+  });
+
+  app.get('/api/git/auth', async (req, reply) => {
+    try {
+      const testSsh = req.query?.testSsh !== 'false';
+      const keyPath = req.query?.keyPath;
+      const status = detectGitAuth({ sshKeyPath: keyPath, testSsh });
+      reply.send(status);
+    } catch (err) {
+      reply.code(500).send({ error: err.message });
+    }
+  });
+
+  app.post('/api/git/test-ssh', async (req, reply) => {
+    try {
+      const keyPath = req.body?.keyPath;
+      const host = req.body?.host || 'git@github.com';
+      const test = testSshConnection(keyPath, host);
+      reply.send(test);
     } catch (err) {
       reply.code(500).send({ error: err.message });
     }

@@ -73,11 +73,19 @@ import {
   getImpactLevel,
   isEligibleForAutoApprove
 } from '../src/services/approval-policy.js';
+import {
+  detectGitAuth,
+  testSshConnection,
+  setGitUser
+} from '../src/services/git-auth.js';
 
 export {
   hasSensitiveOrBreaking,
   getImpactLevel,
-  isEligibleForAutoApprove
+  isEligibleForAutoApprove,
+  detectGitAuth,
+  testSshConnection,
+  setGitUser
 };
 
 export class TerminalUi {
@@ -111,6 +119,17 @@ export class TerminalUi {
     this.pasteBuffer = '';
     this.running = false;
     this.pollTimer = null;
+
+    // Enhanced Settings State
+    this.gitAuth = null;
+    this.isCheckingGitAuth = false;
+    this.discoveredModels = ['9router/ayce-combo', '9router/ag/claude-sonnet-4-6', '9router/ag/gemini-3.8-flash-high'];
+    this.settingsDefaultModel = process.env.DEFAULT_MODEL || '9router/ayce-combo';
+    this.reasoningEffort = (process.env.REASONING_EFFORT || 'medium').toLowerCase();
+    this.taskTimeoutSeconds = Number(process.env.TASK_TIMEOUT_SECONDS || 3600);
+    this.maxConcurrentTasks = Number(process.env.MAX_CONCURRENT_TASKS || 2);
+    this.maxRepairAttempts = Number(process.env.MAX_REPAIR_ATTEMPTS || 2);
+    this.logLevel = (process.env.LOG_LEVEL || 'info').toLowerCase();
   }
 
   get tab() {
@@ -346,7 +365,74 @@ export class TerminalUi {
       return this.approvals.filter(a => a.id.toLowerCase().includes(q) || (a.project_id || '').toLowerCase().includes(q));
     }
     if (this.tab === 'settings') {
+      if (this.gitAuth === null && !this.isCheckingGitAuth) {
+        this.detectGitAuth(false).catch(() => {});
+      }
+      const gitStatus = this.gitAuth?.status || (this.isCheckingGitAuth ? 'CHECKING...' : 'NOT CONNECTED');
+      const modelOpts = (this.discoveredModels || []).map(m => (typeof m === 'string' ? m : m.id));
       const items = [
+        {
+          id: 'git_account',
+          label: 'Git Account',
+          value: gitStatus,
+          type: 'modal',
+          description: 'Git provider authentication status and credentials (SSH key vs GitHub token/login). Press [Enter] to inspect details, test SSH connection, or configure credentials.'
+        },
+        {
+          id: 'default_model',
+          label: 'AI Model',
+          value: this.settingsDefaultModel || modelOpts[0] || '9router/ayce-combo',
+          type: 'cycle',
+          options: modelOpts,
+          description: 'Base language model utilized by orchestrator worker agents for coding workflows.'
+        },
+        {
+          id: 'fetch_models',
+          label: 'Fetch / Sync Models',
+          value: `${modelOpts.length} models loaded`,
+          type: 'action',
+          description: 'Dynamically re-fetches and synchronizes available AI models from OpenCode CLI and 9router gateway.'
+        },
+        {
+          id: 'reasoning_effort',
+          label: 'Reasoning Effort',
+          value: (this.reasoningEffort || 'medium').toUpperCase(),
+          type: 'cycle',
+          options: ['LOW', 'MEDIUM', 'HIGH'],
+          description: 'Reasoning effort variant used for code reasoning, multi-step refactoring, and security auditing.'
+        },
+        {
+          id: 'task_timeout',
+          label: 'Task Timeout',
+          value: this.getTimeoutLabel(this.taskTimeoutSeconds),
+          type: 'cycle',
+          options: ['15m (900s)', '30m (1800s)', '1h (3600s)', '2h (7200s)'],
+          description: 'Maximum execution time allowed for agent tasks before automatic timeout cancellation.'
+        },
+        {
+          id: 'max_concurrent',
+          label: 'Max Concurrent Tasks',
+          value: `${this.maxConcurrentTasks} tasks`,
+          type: 'cycle',
+          options: ['1 task', '2 tasks', '4 tasks'],
+          description: 'Maximum parallel task workers processed simultaneously across project workspaces.'
+        },
+        {
+          id: 'max_repair',
+          label: 'Max Repair Retries',
+          value: `${this.maxRepairAttempts} attempts`,
+          type: 'cycle',
+          options: ['1 attempt', '2 attempts', '3 attempts'],
+          description: 'Maximum self-repair retry iterations executed when Gate 1 (tests/syntax) or Gate 2 fails.'
+        },
+        {
+          id: 'log_level',
+          label: 'System Log Level',
+          value: (this.logLevel || 'info').toUpperCase(),
+          type: 'cycle',
+          options: ['INFO', 'DEBUG', 'WARN'],
+          description: 'Logging verbosity for background services, agent execution, and audit events.'
+        },
         {
           id: 'auto_approve',
           label: 'Auto-Approve Policy',
@@ -363,17 +449,9 @@ export class TerminalUi {
           description: 'Default target workspace for tasks, jobs, and CLI operations.'
         },
         {
-          id: 'default_model',
-          label: 'Default Model',
-          value: this.settingsDefaultModel || process.env.DEFAULT_MODEL || '9router/ayce-combo#high',
-          type: 'cycle',
-          options: ['9router/ayce-combo#high', '9router/ayce-combo#low', '9router/ayce-combo'],
-          description: 'Default language model utilized by orchestrator worker agents for coding workflows.'
-        },
-        {
           id: 'auto_repair',
           label: 'Auto-Repair on Failure',
-          value: this.autoRepairEnabled !== false ? 'ENABLED (2 attempts)' : 'DISABLED',
+          value: this.autoRepairEnabled !== false ? `ENABLED (${this.maxRepairAttempts} attempts)` : 'DISABLED',
           type: 'toggle',
           description: 'Automatically attempts self-repair iterations when Gate 1 (tests/syntax) or Gate 2 fails.'
         },
@@ -393,7 +471,7 @@ export class TerminalUi {
         }
       ];
       if (!q) return items;
-      return items.filter(it => it.label.toLowerCase().includes(q) || it.value.toLowerCase().includes(q) || it.description.toLowerCase().includes(q));
+      return items.filter(it => it.label.toLowerCase().includes(q) || String(it.value).toLowerCase().includes(q) || it.description.toLowerCase().includes(q));
     }
     return [];
   }
@@ -736,6 +814,13 @@ export class TerminalUi {
         let valBadge = item.value;
         if (item.id === 'auto_approve') {
           valBadge = item.value === 'OFF' ? `${C.red}OFF${C.reset}` : `${C.green}${item.value}${C.reset}`;
+        } else if (item.id === 'git_account') {
+          const isConn = Boolean(this.gitAuth?.connected);
+          valBadge = isConn ? `${C.green}${fit(item.value, 20)}${C.reset}` : `${C.red}${fit(item.value, 20)}${C.reset}`;
+        } else if (item.id === 'reasoning_effort') {
+          valBadge = item.value === 'HIGH' ? `${C.magenta}HIGH${C.reset}` : item.value === 'MEDIUM' ? `${C.yellow}MEDIUM${C.reset}` : `${C.cyan}LOW${C.reset}`;
+        } else if (item.id === 'task_timeout') {
+          valBadge = `${C.cyan}${fit(item.value, 20)}${C.reset}`;
         } else if (item.id === 'auto_repair') {
           valBadge = item.value.startsWith('ENABLED') ? `${C.green}${item.value}${C.reset}` : `${C.red}${item.value}${C.reset}`;
         } else {
@@ -766,6 +851,10 @@ export class TerminalUi {
         rightLines.push(`${C.bold}  Actions:${C.reset}`);
         if (curSetting.type === 'cycle' || curSetting.type === 'toggle') {
           rightLines.push(`  ${C.cyan}[Enter] or [Space]${C.reset} : Cycle / Toggle value`);
+        } else if (curSetting.id === 'git_account') {
+          rightLines.push(`  ${C.cyan}[Enter]${C.reset} : Open Git Account & Auth Manager`);
+        } else if (curSetting.id === 'fetch_models') {
+          rightLines.push(`  ${C.cyan}[Enter]${C.reset} : Re-fetch models from OpenCode / Gateway`);
         } else if (curSetting.id === 'active_project') {
           rightLines.push(`  ${C.cyan}[Enter]${C.reset} : Jump to Projects tab to select workspace`);
         } else {
@@ -1074,6 +1163,10 @@ export class TerminalUi {
       }
 
       // Scrollable Info modal
+      if (this.modal.onKey) {
+        const handled = await this.modal.onKey(str, key);
+        if (handled) return;
+      }
       if (key.name === 'up' || str === 'k') {
         if ((this.modal.scrollOffset || 0) > 0) {
           this.modal.scrollOffset--;
@@ -1304,7 +1397,58 @@ export class TerminalUi {
     } else if (this.tab === 'settings' && items.length > 0) {
       const cur = items[this.selected];
       if (cur) {
-        if (cur.id === 'auto_approve') {
+        if (cur.id === 'git_account') {
+          return this.openGitAccountModal();
+        } else if (cur.id === 'fetch_models') {
+          this.status = 'Fetching models from OpenCode CLI / Gateway...';
+          this.render();
+          await this.fetchModels(true);
+          this.status = `Synced ${this.discoveredModels.length} models successfully`;
+          return this.render();
+        } else if (cur.id === 'default_model') {
+          const opts = cur.options || [];
+          if (opts.length > 0) {
+            const curIdx = opts.indexOf(this.settingsDefaultModel);
+            this.settingsDefaultModel = opts[(curIdx === -1 ? 0 : curIdx + 1) % opts.length];
+            this.status = `AI Model set to: ${this.settingsDefaultModel}`;
+          }
+          return this.render();
+        } else if (cur.id === 'reasoning_effort') {
+          const tiers = ['low', 'medium', 'high'];
+          const curIdx = tiers.indexOf((this.reasoningEffort || 'medium').toLowerCase());
+          this.reasoningEffort = tiers[(curIdx === -1 ? 0 : curIdx + 1) % tiers.length];
+          process.env.REASONING_EFFORT = this.reasoningEffort;
+          this.status = `Reasoning effort set to: ${this.reasoningEffort.toUpperCase()}`;
+          return this.render();
+        } else if (cur.id === 'task_timeout') {
+          const timeouts = [900, 1800, 3600, 7200];
+          const curIdx = timeouts.indexOf(this.taskTimeoutSeconds);
+          this.taskTimeoutSeconds = timeouts[(curIdx === -1 ? 0 : curIdx + 1) % timeouts.length];
+          process.env.TASK_TIMEOUT_SECONDS = String(this.taskTimeoutSeconds);
+          this.status = `Task timeout set to: ${this.getTimeoutLabel(this.taskTimeoutSeconds)}`;
+          return this.render();
+        } else if (cur.id === 'max_concurrent') {
+          const limits = [1, 2, 4];
+          const curIdx = limits.indexOf(this.maxConcurrentTasks);
+          this.maxConcurrentTasks = limits[(curIdx === -1 ? 0 : curIdx + 1) % limits.length];
+          process.env.MAX_CONCURRENT_TASKS = String(this.maxConcurrentTasks);
+          this.status = `Max concurrent tasks set to: ${this.maxConcurrentTasks}`;
+          return this.render();
+        } else if (cur.id === 'max_repair') {
+          const retries = [1, 2, 3];
+          const curIdx = retries.indexOf(this.maxRepairAttempts);
+          this.maxRepairAttempts = retries[(curIdx === -1 ? 0 : curIdx + 1) % retries.length];
+          process.env.MAX_REPAIR_ATTEMPTS = String(this.maxRepairAttempts);
+          this.status = `Max repair retries set to: ${this.maxRepairAttempts}`;
+          return this.render();
+        } else if (cur.id === 'log_level') {
+          const levels = ['info', 'debug', 'warn'];
+          const curIdx = levels.indexOf((this.logLevel || 'info').toLowerCase());
+          this.logLevel = levels[(curIdx === -1 ? 0 : curIdx + 1) % levels.length];
+          process.env.LOG_LEVEL = this.logLevel;
+          this.status = `System log level set to: ${this.logLevel.toUpperCase()}`;
+          return this.render();
+        } else if (cur.id === 'auto_approve') {
           const tiers = ['OFF', 'LOW', 'MEDIUM', 'HIGH', 'MAX'];
           const curIdx = tiers.indexOf(this.autoApproveLevel);
           this.autoApproveLevel = tiers[(curIdx === -1 ? 0 : curIdx + 1) % tiers.length];
@@ -1317,12 +1461,6 @@ export class TerminalUi {
         } else if (cur.id === 'auto_repair') {
           this.autoRepairEnabled = this.autoRepairEnabled === false ? true : false;
           this.status = `Auto-repair on failure is now ${this.autoRepairEnabled ? 'ENABLED' : 'DISABLED'}`;
-          return this.render();
-        } else if (cur.id === 'default_model') {
-          const models = ['9router/ayce-combo#high', '9router/ayce-combo#low', '9router/ayce-combo'];
-          const curIdx = models.indexOf(cur.value);
-          this.settingsDefaultModel = models[(curIdx === -1 ? 0 : curIdx + 1) % models.length];
-          this.status = `Default model set to: ${this.settingsDefaultModel}`;
           return this.render();
         } else if (cur.id === 'active_project') {
           this.switchTab(0);
@@ -1592,7 +1730,11 @@ export class TerminalUi {
         try {
           const res = await this.api(`/projects/${this.activeProject.id}/tasks`, {
             method: 'POST',
-            body: { prompt }
+            body: {
+              prompt,
+              model: this.settingsDefaultModel,
+              effort: this.reasoningEffort
+            }
           });
           this.status = `Task submitted: ${res.id}`;
           await this.silentRefresh();
@@ -1622,7 +1764,12 @@ export class TerminalUi {
         try {
           const res = await this.api('/jobs', {
             method: 'POST',
-            body: { project_id: this.activeProject.id, prompt }
+            body: {
+              project_id: this.activeProject.id,
+              prompt,
+              model: this.settingsDefaultModel,
+              effort: this.reasoningEffort
+            }
           });
           this.status = `Job scheduled: ${res.id}`;
           await this.silentRefresh();
@@ -1669,6 +1816,186 @@ export class TerminalUi {
       onConfirm
     };
     this.render();
+  }
+
+  getTimeoutLabel(seconds) {
+    if (seconds >= 3600) return `${Math.round(seconds / 3600)}h (${seconds}s)`;
+    return `${Math.round(seconds / 60)}m (${seconds}s)`;
+  }
+
+  async detectGitAuth(forceTest = false) {
+    this.isCheckingGitAuth = true;
+    try {
+      this.gitAuth = detectGitAuth({ testSsh: forceTest !== false });
+    } catch (e) {
+      this.gitAuth = { connected: false, authType: 'none', status: 'ERROR', message: e.message };
+    } finally {
+      this.isCheckingGitAuth = false;
+    }
+    return this.gitAuth;
+  }
+
+  async fetchModels(forceRefresh = false) {
+    try {
+      if (this.api) {
+        try {
+          const res = await this.api('/api/models/registry');
+          if (Array.isArray(res) && res.length > 0) {
+            this.discoveredModels = res.map(m => m.id);
+            if (!this.settingsDefaultModel && this.discoveredModels[0]) {
+              this.settingsDefaultModel = this.discoveredModels[0];
+            }
+            return this.discoveredModels;
+          }
+        } catch {}
+      }
+      const { ModelRegistry } = await import('../src/services/model-registry.js').catch(() => ({}));
+      if (ModelRegistry) {
+        const models = ModelRegistry.discoverModels({ forceRefresh });
+        if (models && models.length > 0) {
+          this.discoveredModels = models.map(m => (typeof m === 'string' ? m : m.id));
+          if (!this.settingsDefaultModel && this.discoveredModels[0]) {
+            this.settingsDefaultModel = this.discoveredModels[0];
+          }
+          return this.discoveredModels;
+        }
+      }
+    } catch {}
+    if (!this.discoveredModels || this.discoveredModels.length === 0) {
+      this.discoveredModels = ['9router/ayce-combo', '9router/ag/claude-sonnet-4-6', '9router/ag/gemini-3.8-flash-high'];
+    }
+    return this.discoveredModels;
+  }
+
+  openGitAccountModal() {
+    const isConn = Boolean(this.gitAuth?.connected);
+    const badge = isConn
+      ? `${C.green}● CONNECTED${C.reset}`
+      : `${C.red}✖ NOT CONNECTED${C.reset}`;
+
+    this.modal = {
+      title: 'Git Account & Authentication',
+      type: 'info',
+      scrollOffset: 0,
+      lines: [
+        `Status:         ${badge}`,
+        `Summary:        ${this.gitAuth?.status || 'Unknown'}`,
+        `Auth Method:    ${(this.gitAuth?.authType || 'NONE').toUpperCase()}`,
+        `SSH User:       ${this.gitAuth?.sshUser ? C.green + this.gitAuth.sshUser + C.reset : C.dim + '(unauthenticated)' + C.reset}`,
+        `SSH Key:        ${this.gitAuth?.sshKeyPath || C.dim + '(none detected in ~/.ssh)' + C.reset}`,
+        `Git user.name:  ${this.gitAuth?.gitUser || C.dim + '(not set)' + C.reset}`,
+        `Git user.email: ${this.gitAuth?.gitEmail || C.dim + '(not set)' + C.reset}`,
+        `GitHub Token:   ${this.gitAuth?.hasToken ? C.green + 'Active (env GITHUB_TOKEN)' + C.reset : C.dim + 'Not configured' + C.reset}`,
+        '',
+        `${C.bold}Authentication Options:${C.reset}`,
+        `  ${C.cyan}[t]${C.reset} Test SSH Connection live (ssh -T git@github.com)`,
+        `  ${C.cyan}[s]${C.reset} Specify custom SSH Key path`,
+        `  ${C.cyan}[u]${C.reset} Set Git user.name and user.email`,
+        `  ${C.cyan}[l]${C.reset} Set GitHub Personal Access Token (Login)`,
+        `  ${C.cyan}[r]${C.reset} Re-detect Git Account status`,
+        `  ${C.dim}[Esc / Enter / q] Close dialog${C.reset}`
+      ],
+      onKey: async (str) => {
+        if (str === 't') {
+          this.status = 'Testing SSH connection to git@github.com...';
+          this.render();
+          const res = testSshConnection(this.gitAuth?.sshKeyPath);
+          this.status = res.ok
+            ? `SSH Success: ${res.message}`
+            : `SSH Failed: ${res.message}`;
+          await this.detectGitAuth(false);
+          this.openGitAccountModal();
+          return true;
+        }
+        if (str === 's') {
+          this.openConfigureSshKeyModal();
+          return true;
+        }
+        if (str === 'u') {
+          this.openConfigureGitUserModal();
+          return true;
+        }
+        if (str === 'l') {
+          this.openConfigureGitTokenModal();
+          return true;
+        }
+        if (str === 'r') {
+          this.status = 'Re-detecting Git authentication...';
+          this.render();
+          await this.detectGitAuth(true);
+          this.status = `Git Auth: ${this.gitAuth?.status}`;
+          this.openGitAccountModal();
+          return true;
+        }
+        return false;
+      }
+    };
+    this.render();
+  }
+
+  openConfigureSshKeyModal() {
+    this.openPromptModal(
+      'Configure SSH Key Path',
+      {
+        label: 'Enter path to private SSH key:',
+        subtitle: `Current: ${this.gitAuth?.sshKeyPath || '~/.ssh/id_ed25519'}`
+      },
+      async (keyPath) => {
+        if (!keyPath) return this.openGitAccountModal();
+        const expanded = keyPath.startsWith('~') ? keyPath.replace('~', process.env.HOME || '') : keyPath;
+        this.status = `Testing key ${keyPath}...`;
+        this.render();
+        const testRes = testSshConnection(expanded);
+        if (testRes.ok) {
+          this.status = `SSH key verified! Authenticated as ${testRes.user || 'git'}`;
+        } else {
+          this.status = `Warning: SSH test failed: ${testRes.message}`;
+        }
+        this.gitAuth = detectGitAuth({ sshKeyPath: expanded, testSsh: testRes.ok });
+        this.openGitAccountModal();
+      }
+    );
+  }
+
+  openConfigureGitUserModal() {
+    this.openFormModal(
+      'Configure Git User Identity',
+      [
+        { key: 'name', label: 'Git User Name (user.name)', value: this.gitAuth?.gitUser || '' },
+        { key: 'email', label: 'Git User Email (user.email)', value: this.gitAuth?.gitEmail || '' }
+      ],
+      async (formData) => {
+        if (formData.name || formData.email) {
+          setGitUser({ name: formData.name, email: formData.email });
+          this.status = `Git identity updated: ${formData.name || ''} <${formData.email || ''}>`;
+        }
+        await this.detectGitAuth(false);
+        this.openGitAccountModal();
+      }
+    );
+  }
+
+  openConfigureGitTokenModal() {
+    this.openPromptModal(
+      'Configure GitHub Personal Access Token (Login)',
+      {
+        label: 'Enter GitHub Personal Access Token:',
+        subtitle: 'Used for HTTPS git authentication and API operations'
+      },
+      async (token) => {
+        if (token) {
+          process.env.GITHUB_TOKEN = token;
+          process.env.GH_TOKEN = token;
+          this.status = 'GitHub Personal Access Token configured for session';
+        } else {
+          delete process.env.GITHUB_TOKEN;
+          delete process.env.GH_TOKEN;
+          this.status = 'GitHub Token removed';
+        }
+        await this.detectGitAuth(false);
+        this.openGitAccountModal();
+      }
+    );
   }
 }
 
