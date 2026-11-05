@@ -1,6 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TerminalUi, fit, progressBar, visibleLen, stripAnsi, wrapText } from '../bin/tui.js';
+import {
+  TerminalUi,
+  fit,
+  progressBar,
+  visibleLen,
+  stripAnsi,
+  wrapText,
+  isEligibleForAutoApprove,
+  getImpactLevel,
+  hasSensitiveOrBreaking
+} from '../bin/tui.js';
 
 test('TUI unit: stripAnsi and visibleLen handle color codes', () => {
   const colored = '\x1b[32m\x1b[1mHello World\x1b[0m';
@@ -347,7 +357,7 @@ test('TUI unit: pointer in projects defaults to active project and preserves per
   assert.equal(ui.selected, 1); // Preserved!
 });
 
-test('TUI unit: toggle auto-approve in approvals tab auto-decides medium impact approvals via keep_local', async () => {
+test('TUI unit: auto-approval 5-tier policy (OFF|LOW|MEDIUM|HIGH|MAX=NO LIMIT) and key cycling', async () => {
   const decided = [];
   const ui = new TerminalUi({
     api: async (url, opts) => {
@@ -361,42 +371,42 @@ test('TUI unit: toggle auto-approve in approvals tab auto-decides medium impact 
     setActiveProject: () => {}
   });
 
-  const app1 = {
+  const appLow = {
     id: 'app-low-1',
     project_id: 'p1',
     files_changed: ['src/utils.js'],
     diff_summary: { added: 1, modified: 0, deleted: 0 },
     proposed_commit_message: 'feat: add helper'
   };
-  const app2 = {
+  const appEnv = {
     id: 'app-high-env',
     project_id: 'p1',
     files_changed: ['.env'],
     diff_summary: { added: 0, modified: 1, deleted: 0 },
     proposed_commit_message: 'fix: update env'
   };
-  const app3 = {
+  const appMed = {
     id: 'app-med-del',
     project_id: 'p1',
     files_changed: ['src/old.js'],
     diff_summary: { added: 0, modified: 0, deleted: 2 },
     proposed_commit_message: 'refactor: delete old files'
   };
-  const app4 = {
+  const appHighFiles = {
     id: 'app-high-many-files',
     project_id: 'p1',
     files_changed: Array.from({ length: 18 }, (_, i) => `src/file_${i}.js`),
     diff_summary: { added: 18, modified: 0, deleted: 0 },
     proposed_commit_message: 'feat: massive overhaul'
   };
-  const app5 = {
+  const appHighDel = {
     id: 'app-high-many-deletions',
     project_id: 'p1',
     files_changed: ['src/a.js'],
     diff_summary: { added: 0, modified: 0, deleted: 6 },
     proposed_commit_message: 'chore: remove entire module'
   };
-  const app6 = {
+  const appBreaking = {
     id: 'app-high-breaking',
     project_id: 'p1',
     files_changed: ['src/api.js'],
@@ -404,36 +414,67 @@ test('TUI unit: toggle auto-approve in approvals tab auto-decides medium impact 
     proposed_commit_message: 'feat: breaking change to public API'
   };
 
-  assert.equal(ui.getImpactLevel(app1), 'low');
-  assert.equal(ui.getImpactLevel(app2), 'high');
-  assert.equal(ui.getImpactLevel(app3), 'medium');
-  assert.equal(ui.getImpactLevel(app4), 'high');
-  assert.equal(ui.getImpactLevel(app5), 'high');
-  assert.equal(ui.getImpactLevel(app6), 'high');
+  // Tier 1: OFF
+  assert.equal(isEligibleForAutoApprove(appLow, 'OFF'), false);
+  assert.equal(isEligibleForAutoApprove(appMed, 'OFF'), false);
+  assert.equal(isEligibleForAutoApprove(appHighFiles, 'OFF'), false);
 
-  assert.equal(ui.isMediumImpact(app1), true);
-  assert.equal(ui.isMediumImpact(app2), false);
-  assert.equal(ui.isMediumImpact(app3), true);
-  assert.equal(ui.isMediumImpact(app4), false);
-  assert.equal(ui.isMediumImpact(app5), false);
-  assert.equal(ui.isMediumImpact(app6), false);
+  // Tier 2: LOW (<= 5 files, 0 deletions, no sensitive)
+  assert.equal(isEligibleForAutoApprove(appLow, 'LOW'), true);
+  assert.equal(isEligibleForAutoApprove(appMed, 'LOW'), false);
+  assert.equal(isEligibleForAutoApprove(appHighFiles, 'LOW'), false);
+  assert.equal(isEligibleForAutoApprove(appEnv, 'LOW'), false);
 
-  ui.approvals = [app1, app2, app3, app4, app5, app6];
+  // Tier 3: MEDIUM (<= 15 files, <= 3 deletions, no sensitive)
+  assert.equal(isEligibleForAutoApprove(appLow, 'MEDIUM'), true);
+  assert.equal(isEligibleForAutoApprove(appMed, 'MEDIUM'), true);
+  assert.equal(isEligibleForAutoApprove(appHighFiles, 'MEDIUM'), false);
+  assert.equal(isEligibleForAutoApprove(appHighDel, 'MEDIUM'), false);
+  assert.equal(isEligibleForAutoApprove(appBreaking, 'MEDIUM'), false);
+
+  // Tier 4: HIGH (allows large files/deletions, but excludes sensitive files & breaking changes)
+  assert.equal(isEligibleForAutoApprove(appLow, 'HIGH'), true);
+  assert.equal(isEligibleForAutoApprove(appMed, 'HIGH'), true);
+  assert.equal(isEligibleForAutoApprove(appHighFiles, 'HIGH'), true);
+  assert.equal(isEligibleForAutoApprove(appHighDel, 'HIGH'), true);
+  assert.equal(isEligibleForAutoApprove(appEnv, 'HIGH'), false);
+  assert.equal(isEligibleForAutoApprove(appBreaking, 'HIGH'), false);
+
+  // Tier 5: MAX / NO LIMIT (unconditional)
+  assert.equal(isEligibleForAutoApprove(appLow, 'MAX'), true);
+  assert.equal(isEligibleForAutoApprove(appEnv, 'MAX'), true);
+  assert.equal(isEligibleForAutoApprove(appBreaking, 'MAX'), true);
+  assert.equal(isEligibleForAutoApprove(appBreaking, 'NO LIMIT'), true);
+
+  // Test interactive key cycling: OFF -> LOW -> MEDIUM -> HIGH -> MAX -> OFF
+  ui.approvals = [appLow];
   ui.tabIndex = 2; // Approvals tab
 
-  // Toggle auto-approve ON with 'a'
+  assert.equal(ui.autoApproveLevel, 'OFF');
   assert.equal(ui.autoApprove, false);
+
+  // Cycle to LOW
   await ui.handleKey('a', { name: 'a' });
+  assert.equal(ui.autoApproveLevel, 'LOW');
   assert.equal(ui.autoApprove, true);
-
-  // app1 (low) and app3 (medium) must have been auto-decided with keep_local; others must NOT
-  assert.equal(decided.length, 2);
+  assert.equal(decided.length, 1);
   assert.equal(decided[0].url, '/approvals/app-low-1/decide');
-  assert.equal(decided[0].body.decision, 'keep_local');
-  assert.equal(decided[1].url, '/approvals/app-med-del/decide');
-  assert.equal(decided[1].body.decision, 'keep_local');
 
-  // Toggle auto-approve OFF with 'a'
+  // Cycle to MEDIUM
   await ui.handleKey('a', { name: 'a' });
+  assert.equal(ui.autoApproveLevel, 'MEDIUM');
+
+  // Cycle to HIGH
+  await ui.handleKey('a', { name: 'a' });
+  assert.equal(ui.autoApproveLevel, 'HIGH');
+
+  // Cycle to MAX
+  await ui.handleKey('a', { name: 'a' });
+  assert.equal(ui.autoApproveLevel, 'MAX');
+  assert.match(ui.renderFooter(80), /Auto-Approve \(MAX=NO LIMIT\)/);
+
+  // Cycle back to OFF
+  await ui.handleKey('a', { name: 'a' });
+  assert.equal(ui.autoApproveLevel, 'OFF');
   assert.equal(ui.autoApprove, false);
 });

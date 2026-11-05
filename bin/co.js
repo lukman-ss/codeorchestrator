@@ -5,7 +5,7 @@ import { resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { launchTui } from './tui.js';
+import { launchTui, isEligibleForAutoApprove, getImpactLevel } from './tui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(__dirname, '..');
@@ -47,7 +47,9 @@ const { values: opts, positionals: rawArgs } = parseArgs({
     help: { type: 'boolean', short: 'h' },
     slug: { type: 'string' },
     repo: { type: 'string' },
-    branch: { type: 'string' }
+    branch: { type: 'string' },
+    search: { type: 'string', short: 's' },
+    auto: { type: 'string', short: 'a' }
   },
   allowPositionals: true,
   strict: false
@@ -130,7 +132,8 @@ Usage: co <command> [arguments] [options]
 
 Commands:
   tui, ui                      Open interactive terminal dashboard
-  project list                 List all projects (* marks active project)
+  project list [query]         List all projects (* marks active, optional search)
+  project search <query>       Search projects by name, slug, or repo
   project current              Show active project
   project set <slug>           Set default active project
   project create <name>        Create a new project (--slug, --repo, --branch, --model)
@@ -139,7 +142,7 @@ Commands:
   job <prompt>                 Submit multi-agent job to project (-p, -w)
   status <id>                  Check status of task or job
   tasks [filter]               List tasks by status (run, blok, done, fail)
-  approvals                    List pending Gate 3 Git approvals
+  approvals [--auto <tier>]    List pending approvals or auto-approve (OFF|LOW|MEDIUM|HIGH|MAX)
   approve <id> [decision]      Decide approval (push, create_pr, keep_local, reject)
 
 Options:
@@ -195,7 +198,8 @@ async function main() {
   switch (cmd) {
     case 'project': {
       const sub = subArgs[0] || 'list';
-      if (sub === 'list' || sub === 'ls') return handleProjectList();
+      if (sub === 'list' || sub === 'ls') return handleProjectList(subArgs[1]);
+      if (sub === 'search') return handleProjectList(subArgs.slice(1).join(' '));
       if (sub === 'current' || sub === 'get') return handleProjectCurrent();
       if (sub === 'set' || sub === 'use') return handleProjectSet(subArgs[1]);
       if (sub === 'create') return handleProjectCreate(subArgs.slice(1).join(' '));
@@ -211,7 +215,7 @@ async function main() {
     case 'tasks':
       return handleTasks(subArgs[0]);
     case 'approvals':
-      return handleApprovals();
+      return handleApprovals(subArgs[0]);
     case 'approve':
       return handleApprove(subArgs[0], subArgs[1]);
     default:
@@ -219,12 +223,27 @@ async function main() {
   }
 }
 
-async function handleProjectList() {
-  const projects = await api('/projects');
+async function handleProjectList(queryArg) {
+  const searchTerm = (queryArg || opts.search || '').trim().toLowerCase();
+  const path = searchTerm ? `/projects?search=${encodeURIComponent(searchTerm)}` : '/projects';
+  let projects = await api(path);
+
+  // Client-side fallback filter
+  if (searchTerm && projects.length > 0) {
+    projects = projects.filter(p =>
+      (p.name || '').toLowerCase().includes(searchTerm) ||
+      (p.slug || '').toLowerCase().includes(searchTerm) ||
+      (p.description || '').toLowerCase().includes(searchTerm) ||
+      (p.repo_url || '').toLowerCase().includes(searchTerm) ||
+      (p.repository_url || '').toLowerCase().includes(searchTerm)
+    );
+  }
+
   if (opts.json) return console.log(JSON.stringify(projects, null, 2));
 
   const active = getStoredActiveProject();
-  console.log(`\nProjects (${projects.length}):`);
+  const header = searchTerm ? `Projects matching "${searchTerm}" (${projects.length}):` : `Projects (${projects.length}):`;
+  console.log(`\n${header}`);
   for (const p of projects) {
     const isActive = active && (p.slug === active || p.id === active || p.name.toLowerCase() === active.toLowerCase());
     const marker = isActive ? '* ' : '  ';
@@ -358,7 +377,7 @@ async function handleStatus(id) {
   if (data.workflow_status) console.log(`Workflow: ${data.workflow_status}`);
 }
 
-async function handleApprovals() {
+async function handleApprovals(subArg) {
   const activeSlug = getStoredActiveProject();
   let projectId = null;
   if (activeSlug && !opts.project) {
@@ -382,9 +401,35 @@ async function handleApprovals() {
     return;
   }
 
+  const autoRaw = opts.auto !== undefined ? opts.auto : subArg;
+  const autoTier = autoRaw ? String(autoRaw).toUpperCase().trim() : null;
+  if (autoTier) {
+    const valid = ['OFF', 'LOW', 'MEDIUM', 'HIGH', 'MAX', 'NO LIMIT'];
+    if (!valid.includes(autoTier)) {
+      throw new Error(`Invalid auto-approve tier: ${autoRaw}. Allowed: OFF, LOW, MEDIUM, HIGH, MAX`);
+    }
+    const tier = autoTier === 'NO LIMIT' ? 'MAX' : autoTier;
+    if (tier === 'OFF') {
+      console.log('Auto-approve is OFF. No approvals processed.');
+      return;
+    }
+    const eligible = approvals.filter(a => isEligibleForAutoApprove(a, tier));
+    if (eligible.length === 0) {
+      console.log(`No approvals eligible under auto-approval tier ${tier}.`);
+      return;
+    }
+    const autoDecision = (opts.decision || 'push').toLowerCase();
+    console.log(`Auto-approving ${eligible.length} of ${approvals.length} request(s) under tier ${tier} (${autoDecision})...`);
+    for (const a of eligible) {
+      await handleApprove(a.id, autoDecision);
+    }
+    return;
+  }
+
   console.log(`\nPending Approvals (${approvals.length}):`);
   for (const a of approvals) {
-    console.log(`- [${a.id}] Project: ${a.project_id}`);
+    const impact = getImpactLevel(a).toUpperCase();
+    console.log(`- [${a.id}] Project: ${a.project_id} [${impact} IMPACT]`);
     console.log(`  Task/Job:    ${a.task_id || a.job_id || 'N/A'}`);
     console.log(`  Base Branch: ${a.base_branch || 'main'}`);
     console.log(`  Created:     ${a.created_at || 'unknown'}`);

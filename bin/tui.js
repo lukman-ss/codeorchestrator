@@ -68,8 +68,20 @@ export function progressBar(percent = 0, width = 16) {
   return `${color}${'█'.repeat(filled)}${C.gray}${'░'.repeat(empty)}${C.reset} ${fit(`${Math.round(p)}%`, 4)}`;
 }
 
+import {
+  hasSensitiveOrBreaking,
+  getImpactLevel,
+  isEligibleForAutoApprove
+} from '../src/services/approval-policy.js';
+
+export {
+  hasSensitiveOrBreaking,
+  getImpactLevel,
+  isEligibleForAutoApprove
+};
+
 export class TerminalUi {
-  constructor({ api, getActiveProject, setActiveProject }) {
+  constructor({ api, getActiveProject, setActiveProject, autoApproveLevel } = {}) {
     this.api = api;
     this.getActiveProject = getActiveProject;
     this.setActiveProject = setActiveProject;
@@ -84,7 +96,10 @@ export class TerminalUi {
     this.tasks = [];
     this.taskStatusFilter = 'ALL'; // 'ALL', 'RUNNING', 'BLOCKED', 'COMPLETED', 'FAILED'
     this.approvals = [];
-    this.autoApprove = false;
+    this.autoApproveLevel = (autoApproveLevel || process.env.AUTO_APPROVE_LEVEL || 'OFF').toUpperCase();
+    if (!['OFF', 'LOW', 'MEDIUM', 'HIGH', 'MAX'].includes(this.autoApproveLevel)) {
+      this.autoApproveLevel = 'OFF';
+    }
     this.isProcessingAutoApprove = false;
     this.health = null;
     this.activeSlug = this.getActiveProject ? this.getActiveProject() : null;
@@ -105,6 +120,21 @@ export class TerminalUi {
   set tab(val) {
     const idx = this.tabs.indexOf(val);
     if (idx !== -1) this.switchTab(idx);
+  }
+
+  get autoApprove() {
+    return this.autoApproveLevel !== 'OFF';
+  }
+
+  set autoApprove(val) {
+    if (typeof val === 'string') {
+      const normalized = val.toUpperCase().trim();
+      if (['OFF', 'LOW', 'MEDIUM', 'HIGH', 'MAX'].includes(normalized)) {
+        this.autoApproveLevel = normalized;
+        return;
+      }
+    }
+    this.autoApproveLevel = val ? 'MEDIUM' : 'OFF';
   }
 
   getTabSelected(tab) {
@@ -181,75 +211,37 @@ export class TerminalUi {
     process.exit(0);
   }
 
+  hasSensitiveOrBreaking(app) {
+    return hasSensitiveOrBreaking(app);
+  }
+
   getImpactLevel(app) {
-    if (!app) return 'high';
-    let diff = app.diff_summary;
-    if (typeof diff === 'string') {
-      try { diff = JSON.parse(diff); } catch { diff = {}; }
-    }
-    diff = diff || {};
+    return getImpactLevel(app);
+  }
 
-    let files = app.files_changed;
-    if (typeof files === 'string') {
-      try { files = JSON.parse(files); } catch { files = []; }
-    }
-    files = files || [];
-
-    // Check sensitive file patterns - always high impact
-    const sensitive = [
-      /\.env(\.|$)/i,
-      /\.pem$/i,
-      /\.key$/i,
-      /id_rsa/i,
-      /secret/i,
-      /credential/i,
-      /\.github\//i,
-      /docker-compose/i,
-      /production/i
-    ];
-    for (const f of files) {
-      if (typeof f === 'string' && sensitive.some(pat => pat.test(f))) {
-        return 'high';
-      }
-    }
-
-    // Check commit message for high-impact keywords
-    const msg = (app.proposed_commit_message || '').toLowerCase();
-    if (msg.includes('breaking') || msg.includes('drop table') || msg.includes('drop database') || msg.includes('schema migration') || msg.includes('truncate')) {
-      return 'high';
-    }
-
-    const delCount = diff.deleted || 0;
-    // More than 15 files changed or more than 3 deleted is high impact
-    if (files.length > 15 || delCount > 3) return 'high';
-
-    // 5 or fewer files changed and 0 deleted is low impact
-    if (files.length <= 5 && delCount === 0) return 'low';
-
-    // Up to 15 files changed and up to 3 deletions is medium impact
-    return 'medium';
+  isEligibleForAutoApprove(app, level = this.autoApproveLevel) {
+    return isEligibleForAutoApprove(app, level);
   }
 
   isMediumImpact(app) {
-    const lvl = this.getImpactLevel(app);
-    return lvl === 'low' || lvl === 'medium';
+    return this.isEligibleForAutoApprove(app, 'MEDIUM');
   }
 
   isLessImpact(app) {
-    return this.isMediumImpact(app);
+    return this.isEligibleForAutoApprove(app, 'LOW');
   }
 
   async processAutoApprovals() {
-    if (!this.autoApprove || this.isProcessingAutoApprove) return;
+    if (this.autoApproveLevel === 'OFF' || this.isProcessingAutoApprove) return;
     this.isProcessingAutoApprove = true;
     try {
       const pending = [...this.approvals];
-      const eligibleApps = pending.filter(a => this.isMediumImpact(a));
+      const eligibleApps = pending.filter(a => this.isEligibleForAutoApprove(a));
       for (const app of eligibleApps) {
         try {
-          await this.decide(app.id, 'keep_local');
+          await this.decide(app.id, 'push');
           const lvl = this.getImpactLevel(app);
-          this.status = `Auto-approved ${app.id.slice(0, 8)} (keep_local, ${lvl} impact)`;
+          this.status = `Auto-approved ${app.id.slice(0, 8)} (pushed, ${lvl} [${this.autoApproveLevel}])`;
         } catch (e) {
           this.status = `Auto-approve failed for ${app.id.slice(0, 8)}: ${e.message}`;
         }
@@ -300,7 +292,14 @@ export class TerminalUi {
     const q = this.filter.trim().toLowerCase();
     if (this.tab === 'projects') {
       if (!q) return this.projects;
-      return this.projects.filter(p => p.name.toLowerCase().includes(q) || p.slug.toLowerCase().includes(q));
+      return this.projects.filter(p =>
+        (p.name || '').toLowerCase().includes(q) ||
+        (p.slug || '').toLowerCase().includes(q) ||
+        (p.description || '').toLowerCase().includes(q) ||
+        (p.workspace_path || '').toLowerCase().includes(q) ||
+        (p.repo_url || '').toLowerCase().includes(q) ||
+        (p.default_model || '').toLowerCase().includes(q)
+      );
     }
     if (this.tab === 'tasks') {
       let list = [...this.tasks];
@@ -572,7 +571,17 @@ export class TerminalUi {
       if (items.length > 0 && this.selected >= items.length) {
         this.selected = items.length - 1;
       }
-      const autoTag = this.autoApprove ? `${C.green}[AUTO: ON (MEDIUM IMPACT)]${C.reset}` : `${C.dim}[AUTO: OFF]${C.reset}`;
+      const levelColors = {
+        OFF: C.dim,
+        LOW: C.green,
+        MEDIUM: C.yellow,
+        HIGH: C.magenta,
+        MAX: `${C.bold}${C.red}`
+      };
+      const curLvl = this.autoApproveLevel;
+      const tagColor = levelColors[curLvl] || C.dim;
+      const tagText = curLvl === 'MAX' ? 'MAX (NO LIMIT)' : curLvl;
+      const autoTag = `${tagColor}[AUTO: ${tagText}]${C.reset}`;
       leftLines.push(`${C.bold}${C.cyan}  PENDING APPROVALS${C.reset} ${autoTag}`);
       if (!items.length) {
         leftLines.push(`  ${C.green}✔ All clean. No approvals pending.${C.reset}`);
@@ -597,10 +606,15 @@ export class TerminalUi {
       const curApp = items[this.selected];
       if (curApp) {
         const lvl = this.getImpactLevel(curApp);
-        const isEligible = lvl === 'low' || lvl === 'medium';
-        const impactDesc = isEligible
-          ? `${lvl === 'low' ? C.green : C.yellow}${lvl.toUpperCase()} IMPACT (eligible for auto-approval)${C.reset}`
-          : `${C.red}HIGH IMPACT (requires manual review)${C.reset}`;
+        const isEligible = this.isEligibleForAutoApprove(curApp);
+        let impactDesc = '';
+        if (curLvl === 'OFF') {
+          impactDesc = `${lvl === 'low' ? C.green : lvl === 'medium' ? C.yellow : C.red}${lvl.toUpperCase()} IMPACT (auto-approve off)${C.reset}`;
+        } else if (isEligible) {
+          impactDesc = `${lvl === 'low' ? C.green : lvl === 'medium' ? C.yellow : C.red}${lvl.toUpperCase()} IMPACT ${C.green}(auto-eligible: ${tagText})${C.reset}`;
+        } else {
+          impactDesc = `${C.red}${lvl.toUpperCase()} IMPACT (requires manual review)${C.reset}`;
+        }
         rightLines.push(`${C.bold}${C.yellow}  GATE 3 GIT APPROVAL REVIEW${C.reset}`);
         rightLines.push(`  ${C.dim}Approval ID:${C.reset} ${curApp.id}`);
         rightLines.push(`  ${C.dim}Project:${C.reset}     ${curApp.project_id}`);
@@ -609,7 +623,7 @@ export class TerminalUi {
         rightLines.push(`  ${C.dim}Message:${C.reset}     ${curApp.proposed_commit_message || '(No message)'}`);
         rightLines.push('');
         rightLines.push(`${C.bold}  Decide Operation:${C.reset}`);
-        rightLines.push(`  ${this.autoApprove ? C.green : C.dim}[a] AUTO-APPROVE: ${this.autoApprove ? 'ON (Medium Impact: keep_local)' : 'OFF'}${C.reset}`);
+        rightLines.push(`  ${tagColor}[a] AUTO-APPROVE: ${tagText}${curLvl !== 'OFF' ? ' (push)' : ''}${C.reset}`);
         rightLines.push(`  ${C.green}[p] PUSH${C.reset}       Merge & push to upstream git remote`);
         rightLines.push(`  ${C.cyan}[k] KEEP LOCAL${C.reset} Preserve changes in workspace without push`);
         rightLines.push(`  ${C.red}[x] REJECT${C.reset}     Drop or invalidate changes`);
@@ -617,7 +631,7 @@ export class TerminalUi {
       } else {
         rightLines.push(`  ${C.dim}No pending approval selected${C.reset}`);
         rightLines.push('');
-        rightLines.push(`  ${this.autoApprove ? C.green : C.dim}[a] AUTO-APPROVE: ${this.autoApprove ? 'ON (Medium Impact: keep_local)' : 'OFF'}${C.reset}`);
+        rightLines.push(`  ${tagColor}[a] AUTO-APPROVE: ${tagText}${curLvl !== 'OFF' ? ' (push)' : ''}${C.reset}`);
       }
     } else if (this.tab === 'system') {
       leftLines.push(`${C.bold}${C.cyan}  SYSTEM METRICS${C.reset}`);
@@ -672,7 +686,10 @@ export class TerminalUi {
     let hotkeys = '[Tab] Tab  [↑↓] Move  [Enter] Select  [/] Search  [t] Task  [?] Help  [q] Quit';
     if (this.tab === 'projects') hotkeys = '[Enter] Activate  [c/n] Create  [i] Import  [v] Validate  [g] Remote  [t] Task  [/] Search';
     if (this.tab === 'tasks') hotkeys = '[v/Enter] Logs  [s] Filter Status  [c] Cancel  [R] Recover  [t] New  [/] Search';
-    if (this.tab === 'approvals') hotkeys = `[a] Auto-Approve (${this.autoApprove ? 'ON' : 'OFF'})  [p] Push  [k] Keep  [x] Reject  [d] Diff  [/] Search`;
+    if (this.tab === 'approvals') {
+      const hotkeyLvl = this.autoApproveLevel === 'MAX' ? 'MAX=NO LIMIT' : this.autoApproveLevel;
+      hotkeys = `[a] Auto-Approve (${hotkeyLvl})  [p] Push  [k] Keep  [x] Reject  [d] Diff  [/] Search`;
+    }
 
     const maxHotkeysLen = Math.max(10, cols - 6);
     const dispHotkeys = visibleLen(hotkeys) > maxHotkeysLen ? hotkeys.slice(0, maxHotkeysLen - 1) + '…' : hotkeys;
@@ -1143,9 +1160,12 @@ export class TerminalUi {
     // Approvals: View Diff / Decide / Toggle Auto-Approve
     if (this.tab === 'approvals') {
       if (str === 'a' || str === 'A') {
-        this.autoApprove = !this.autoApprove;
-        this.status = `Auto-approve ${this.autoApprove ? 'ENABLED (Medium Impact: keep_local)' : 'DISABLED'}`;
-        if (this.autoApprove) {
+        const tiers = ['OFF', 'LOW', 'MEDIUM', 'HIGH', 'MAX'];
+        const curIdx = tiers.indexOf(this.autoApproveLevel);
+        this.autoApproveLevel = tiers[(curIdx === -1 ? 0 : curIdx + 1) % tiers.length];
+        const disp = this.autoApproveLevel === 'MAX' ? 'MAX (NO LIMIT)' : this.autoApproveLevel;
+        this.status = `Auto-approve level: ${disp}${this.autoApproveLevel !== 'OFF' ? ' (push)' : ''}`;
+        if (this.autoApproveLevel !== 'OFF') {
           await this.processAutoApprovals();
         }
         return this.render();

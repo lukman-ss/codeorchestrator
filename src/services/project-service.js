@@ -405,12 +405,28 @@ export const createProject = ({
 
 export const listProjects = (options = {}) => {
   const includeTest = typeof options === 'boolean' ? options : !!options.includeTest;
-  let rows;
-  if (includeTest) {
-    rows = dbGet('SELECT * FROM projects ORDER BY created_at DESC');
-  } else {
-    rows = dbGet('SELECT * FROM projects WHERE is_test = 0 ORDER BY created_at DESC');
+  const search = typeof options === 'object' ? (options.search || options.q || '').trim() : '';
+
+  let query = 'SELECT * FROM projects';
+  const conditions = [];
+  const params = [];
+
+  if (!includeTest) {
+    conditions.push('is_test = 0');
   }
+  if (search) {
+    // ponytail: SQLite LIKE search on name, slug, description, and repository URL. Upgrade path: FTS5 virtual table.
+    conditions.push('(name LIKE ? OR slug LIKE ? OR description LIKE ? OR repo_url LIKE ? OR repository_url LIKE ?)');
+    const term = `%${search}%`;
+    params.push(term, term, term, term, term);
+  }
+
+  if (conditions.length > 0) {
+    query += ` WHERE ${conditions.join(' AND ')}`;
+  }
+  query += ' ORDER BY created_at DESC';
+
+  const rows = dbGet(query, params);
   return rows.map(r => {
     r.repository_url = r.repository_url || r.repo_url || null;
     r.repo_url = r.repo_url || r.repository_url || null;

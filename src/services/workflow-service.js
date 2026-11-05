@@ -10,6 +10,7 @@ import { ModelFailover } from './model-failover.js';
 import { ModelRouter } from './model-router.js';
 import { ModelRegistry } from './model-registry.js';
 import { ApprovalService } from './approval-service.js';
+import { isEligibleForAutoApprove } from './approval-policy.js';
 import { emitWebSocketEvent } from '../realtime/event-bus.js';
 import { MAX_REPAIR_ATTEMPTS, OPENCODE_BIN, NINEROUTER_API_KEY, DEFAULT_MODEL } from '../config.js';
 import logger from '../logger.js';
@@ -35,7 +36,8 @@ export class WorkflowService {
     taskFiles = [],
     autoRepair = true,
     repairAttempt = 0,
-    maxRepairAttempts = MAX_REPAIR_ATTEMPTS
+    maxRepairAttempts = MAX_REPAIR_ATTEMPTS,
+    autoPush = false
   }) {
     const reviewId = randomUUID();
     const project = getProject(projectId);
@@ -120,7 +122,8 @@ export class WorkflowService {
             taskFiles,
             autoRepair: true,
             repairAttempt: repairAttempt + 1,
-            maxRepairAttempts
+            maxRepairAttempts,
+            autoPush
           });
         }
       }
@@ -267,7 +270,13 @@ export class WorkflowService {
     }
 
     // Generate git review
-    const gitReview = GitOperations.generateGitReview(projectId, workspacePath, baseline, effectiveTaskFiles);
+    const gitReview = GitOperations.generateGitReview(projectId, workspacePath, baseline, effectiveTaskFiles, {
+      prompt,
+      taskId,
+      jobId,
+      verifRes,
+      auditRes
+    });
 
     // Create durable Git approval request in database (including zero-change tasks)
     const approvalRequest = ApprovalService.createApprovalRequest({
@@ -319,6 +328,29 @@ export class WorkflowService {
       targetBranch: gitReview.targetBranch,
       filesChangedCount: gitReview.taskFiles.length
     });
+
+    const serverAutoLevel = (process.env.AUTO_APPROVE_LEVEL || '').toUpperCase();
+    const shouldAutoApprove = autoPush || (serverAutoLevel && serverAutoLevel !== 'OFF' && isEligibleForAutoApprove(approvalRequest, serverAutoLevel));
+
+    if (shouldAutoApprove) {
+      logger.info({ approvalId: approvalRequest.id, taskId, jobId, serverAutoLevel }, 'Auto-approving verified git changes for push');
+      const decisionRes = await ApprovalService.processDecision({
+        approvalRequestId: approvalRequest.id,
+        userId: 'system',
+        decision: 'push'
+      });
+      return {
+        status: decisionRes.success ? 'completed' : 'failed',
+        approvalId: approvalRequest.id,
+        approvalRequest,
+        reviewId,
+        review: gitReview,
+        gitReview,
+        auditRes,
+        verifRes,
+        pushResult: decisionRes
+      };
+    }
 
     return {
       status: 'awaiting_approval',

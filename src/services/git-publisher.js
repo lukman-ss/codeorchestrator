@@ -69,7 +69,7 @@ export class GitPublisher {
     return { project, workspacePath, currentHead };
   }
 
-  static publishPush({ approval, remote = 'origin', branch = null }) {
+  static async publishPush({ approval, remote = 'origin', branch = null }) {
     const { project, workspacePath, currentHead } = this.validatePublishPreconditions(approval);
     const targetBranch = branch || approval.target_branch || 'main';
 
@@ -92,7 +92,7 @@ export class GitPublisher {
     }
 
     // Perform push with dedicated publisher environment
-    const pushRes = GitOperations.pushApprovedCommit({
+    const pushRes = await GitOperations.pushApprovedCommit({
       workspacePath,
       remote,
       branch: targetBranch,
@@ -116,7 +116,7 @@ export class GitPublisher {
     };
   }
 
-  static publishPullRequest({ approval, baseBranch = null, featureBranch = null, title = null, body = null }) {
+  static async publishPullRequest({ approval, baseBranch = null, featureBranch = null, title = null, body = null }) {
     const { project, workspacePath, currentHead } = this.validatePublishPreconditions(approval);
     const base = baseBranch || approval.target_branch || project.default_branch || 'main';
     const branchName = featureBranch || `orchestrator/${approval.task_id ? 'task-' + approval.task_id.slice(0, 8) : 'job-' + (approval.job_id || 'patch').slice(0, 8)}-${Date.now()}`;
@@ -155,7 +155,7 @@ export class GitPublisher {
     } catch {}
 
     if (hasRemoteOrigin) {
-      const pushRes = GitOperations.pushApprovedCommit({
+      const pushRes = await GitOperations.pushApprovedCommit({
         workspacePath,
         remote: 'origin',
         branch: branchName,

@@ -164,6 +164,12 @@ export const data = new SlashCommandBuilder()
           .setRequired(false)
           .setMinValue(1)
       )
+      .addStringOption(opt =>
+        opt
+          .setName('search')
+          .setDescription('Search query to filter projects')
+          .setRequired(false)
+      )
   )
   .addSubcommand(sub =>
     sub
@@ -1582,16 +1588,28 @@ async function handleApprove(interaction, userId, memberRoles) {
 
 async function handleProjects(interaction, userId, memberRoles) {
   const page = interaction.options.getInteger('page') || 1;
+  const search = (interaction.options.getString('search') || '').trim().toLowerCase();
   const pageSize = 5;
 
-  const projects = await apiClient.fetchProjects({ includeTest: false });
-  const accessible = projects
+  const projects = await apiClient.fetchProjects({ includeTest: false, search });
+  let accessible = projects
     .filter(p => !p.is_test)
     .filter(p => auth.isProjectAllowedForUser(userId, memberRoles, p));
 
+  if (search) {
+    accessible = accessible.filter(p =>
+      (p.name || '').toLowerCase().includes(search) ||
+      (p.slug || '').toLowerCase().includes(search) ||
+      (p.repo_url || '').toLowerCase().includes(search) ||
+      (p.repository_url || '').toLowerCase().includes(search)
+    );
+  }
+
   if (accessible.length === 0) {
     return safeEditReply(interaction, {
-      content: 'No registered coding projects found or you lack permission to view available projects.',
+      content: search
+        ? `No projects found matching "${search}".`
+        : 'No registered coding projects found or you lack permission to view available projects.',
       allowedMentions: safeMentions
     }, { type: 'projects' });
   }

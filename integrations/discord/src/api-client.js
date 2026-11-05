@@ -69,6 +69,7 @@ export class OrchestratorApiClient {
   async fetchProjects(params = {}) {
     const qs = new URLSearchParams();
     if (params.includeTest) qs.set('includeTest', 'true');
+    if (params.search || params.q) qs.set('search', params.search || params.q);
     const query = qs.toString() ? `?${qs.toString()}` : '';
     return this.request(`/projects${query}`);
   }

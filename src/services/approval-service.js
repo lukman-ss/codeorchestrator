@@ -300,7 +300,7 @@ export class ApprovalService {
       }
 
       // Phase C — Push
-      const pushRes = GitOperations.pushApprovedCommit({
+      const pushRes = await GitOperations.pushApprovedCommit({
         workspacePath,
         remote,
         branch,
@@ -389,7 +389,7 @@ export class ApprovalService {
         [opId, approval.task_id, approval.job_id, project.id, approval.id, remote, branch]
       );
 
-      const prRes = GitPublisher.publishPullRequest({
+      const prRes = await GitPublisher.publishPullRequest({
         approval,
         baseBranch: prOptions.baseBranch || branch,
         featureBranch: prOptions.featureBranch || null,

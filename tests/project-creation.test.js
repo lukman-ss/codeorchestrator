@@ -503,3 +503,27 @@ test('32. Mode B Clone: empty remote repo with branch \'main\' initializes branc
   assert.equal(res.body.default_branch, 'main');
   assert.ok(existsSync(join(res.body.workspace_path, '.git')));
 });
+
+// 33. Project Search: GET /projects?search= filters projects by name, slug, or repo
+test('33. Project Search: GET /projects?search= filters projects by name, slug, or repo', async () => {
+  const searchName = `Searchable Alpha ${Date.now()}`;
+  const searchSlug = `search-alpha-${Date.now()}`;
+  const createRes = await req('/projects', 'POST', {
+    name: searchName,
+    slug: searchSlug,
+    initGit: true,
+    isTest: 1
+  });
+  assert.equal(createRes.status, 201);
+
+  // Search match by name/slug with includeTest
+  const matchRes = await req(`/projects?search=${searchSlug}&includeTest=true`, 'GET');
+  assert.equal(matchRes.status, 200);
+  assert.ok(matchRes.body.length >= 1);
+  assert.ok(matchRes.body.some(p => p.slug === searchSlug));
+
+  // Search non-match returns empty
+  const noMatchRes = await req(`/projects?search=definitely-non-existent-xyz&includeTest=true`, 'GET');
+  assert.equal(noMatchRes.status, 200);
+  assert.equal(noMatchRes.body.length, 0);
+});

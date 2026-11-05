@@ -84,6 +84,17 @@ test('CLI: project list marks active project with [ACTIVE]', () => {
   assert.match(res.stdout, /\[ACTIVE\]/);
 });
 
+test('CLI: project search filters matching projects', () => {
+  const res = runCli(['project', 'search', 'cli-slug']);
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /test-cli-project/);
+  assert.match(res.stdout, /Projects matching "cli-slug"/);
+
+  const noMatch = runCli(['project', 'search', 'non-existent-xyz-slug']);
+  assert.equal(noMatch.status, 0, noMatch.stderr);
+  assert.match(noMatch.stdout, /Projects matching "non-existent-xyz-slug" \(0\)/);
+});
+
 test('CLI: run falls back to active project and submits task', () => {
   const res = runCli(['run', 'say hello from cli']);
   assert.equal(res.status, 0, res.stderr);
@@ -148,6 +159,32 @@ test('CLI: approve decides a pending approval', () => {
   const decRes = runCli(['approve', approvalId, 'keep_local']);
   assert.equal(decRes.status, 0, decRes.stderr);
   assert.match(decRes.stdout, /Approval appr-cli-test-1 decided: keep_local/);
+});
+
+test('CLI: approvals --auto <tier> auto-approves eligible requests', () => {
+  const db = new Database(serverContext.dbPath);
+  const project = db.prepare("SELECT id FROM projects WHERE slug = 'cli-slug-test'").get();
+  assert.ok(project);
+
+  const autoAppId = 'appr-cli-auto-1';
+  db.prepare(`
+    INSERT INTO git_approval_requests (
+      id, project_id, repository_identity, target_branch, reviewed_revision, status,
+      diff_summary_json, files_changed_json, proposed_commit_message, created_at
+    ) VALUES (?, ?, ?, ?, 'HEAD', 'pending', '{"added":1,"modified":0,"deleted":0}', '["test.js"]', 'feat: small test', datetime('now'))
+  `).run(autoAppId, project.id, 'local', 'main');
+  db.close();
+
+  // Test --auto low auto-approves low impact
+  const autoRes = runCli(['approvals', '--auto', 'low']);
+  assert.equal(autoRes.status, 0, autoRes.stderr);
+  assert.match(autoRes.stdout, /Auto-approving 1 of 1 request\(s\) under tier LOW/);
+
+  // Check that approval is now decided
+  const db2 = new Database(serverContext.dbPath);
+  const row = db2.prepare('SELECT status FROM git_approval_requests WHERE id = ?').get(autoAppId);
+  db2.close();
+  assert.equal(row.status, 'approved_keep_local');
 });
 
 test('CLI: tasks lists tasks in tabular columns', () => {

@@ -234,8 +234,10 @@ const finish = (task, status, error, pid, code, signal = null) => {
   taskBaselines.delete(id);
 
   const isCompleted = status === 'completed';
-  const workflowStatus = isCompleted ? (taskObj?.project_id ? 'verifying' : 'completed') : 'failed';
-  const taskStatus = (isCompleted && taskObj?.project_id) ? 'running' : status;
+  const wasSignaled = Boolean(signal);
+  const shouldVerify = Boolean(taskObj?.project_id && status !== 'cancelled' && !wasSignaled);
+  const workflowStatus = shouldVerify ? 'verifying' : (isCompleted ? 'completed' : 'failed');
+  const taskStatus = shouldVerify ? 'running' : status;
 
   const effectiveModel = taskObj?.model || DEFAULT_MODEL;
   const failureClassification = !isCompleted
@@ -277,7 +279,7 @@ const finish = (task, status, error, pid, code, signal = null) => {
     error
   }, `Task finished with status: ${taskStatus}`);
 
-  if (isCompleted && taskObj?.project_id) {
+  if (shouldVerify) {
     WorkflowService.startCompletionWorkflow({
       taskId: id,
       projectId: taskObj.project_id,
@@ -348,8 +350,8 @@ export const shutdownAll = async (timeoutMs = (Number(process.env.TASK_KILL_GRAC
 
 export const recoverRunning = (filterTaskId = null) => {
   const query = filterTaskId
-    ? "SELECT t.*, p.slug FROM tasks t LEFT JOIN projects p ON t.project_id=p.id WHERE t.execution_status='running' AND t.id = ?"
-    : "SELECT t.*, p.slug FROM tasks t LEFT JOIN projects p ON t.project_id=p.id WHERE t.execution_status='running'";
+    ? "SELECT t.*, p.slug FROM tasks t LEFT JOIN projects p ON t.project_id=p.id WHERE (t.execution_status='running' OR t.status='running') AND t.id = ?"
+    : "SELECT t.*, p.slug FROM tasks t LEFT JOIN projects p ON t.project_id=p.id WHERE (t.execution_status='running' OR t.status='running')";
   const rows = filterTaskId ? dbGet(query, [filterTaskId]) : dbGet(query);
   for (const row of rows) {
     if (row.pid && typeof row.pid === 'number') {

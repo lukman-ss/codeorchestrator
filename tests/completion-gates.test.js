@@ -4,19 +4,21 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
-import { startTestServer } from './test-helper.js';
+const tempDbDir = mkdtempSync(join(tmpdir(), 'gate-test-db-'));
+const tempDbPath = join(tempDbDir, 'orch-test.db');
+process.env.DATABASE_PATH = tempDbPath;
 
-import { DATABASE_PATH } from '../src/config.js';
-import { init, dbRun, dbGetOne } from '../src/database/db.js';
-import { SecurityAuditor } from '../src/services/security-auditor.js';
-import { ImplementationVerifier } from '../src/services/implementation-verifier.js';
-import { GitOperations } from '../src/services/git-operations.js';
-import { ApprovalService } from '../src/services/approval-service.js';
-import { WorkflowService } from '../src/services/workflow-service.js';
+const { startTestServer } = await import('./test-helper.js');
+const { init, dbRun, dbGetOne, close } = await import('../src/database/db.js');
+const { SecurityAuditor } = await import('../src/services/security-auditor.js');
+const { ImplementationVerifier } = await import('../src/services/implementation-verifier.js');
+const { GitOperations } = await import('../src/services/git-operations.js');
+const { ApprovalService } = await import('../src/services/approval-service.js');
+const { WorkflowService } = await import('../src/services/workflow-service.js');
 
 let serverContext;
 let req;
-let tempDirs = [];
+let tempDirs = [tempDbDir];
 let testProjectId = 'test-proj-gate-1';
 let testRepoPath = '';
 
@@ -34,7 +36,7 @@ function makeTempGitRepo(prefix = 'gate-test-') {
 before(async () => {
   init();
   serverContext = await startTestServer({
-    env: { DATABASE_PATH }
+    env: { DATABASE_PATH: tempDbPath }
   });
   req = serverContext.req;
 
@@ -52,12 +54,12 @@ after(async () => {
   if (serverContext) {
     await serverContext.cleanup();
   }
+  try {
+    close();
+  } catch {}
   for (const d of tempDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch {}
   }
-  try {
-    dbRun("DELETE FROM projects WHERE is_test = 1 OR id LIKE 'proj-%' OR id LIKE 'test-proj-%'");
-  } catch {}
 });
 
 test('Gate 1: ImplementationVerifier passes on valid syntax and criteria', async () => {
@@ -550,4 +552,81 @@ test('REST API: /tasks/recoverable, /tasks/:id/recover, and /tasks/:id/context',
   assert.equal(ctxRes.status, 200);
   assert.equal(ctxRes.body.task_id, tId);
   assert.equal(ctxRes.body.expected_target_repository, 'git@github.com:example/api-recov.git');
+});
+
+test('GitOperations: buildCommitMessage formats conventional header and comprehensive structured body', () => {
+  const msg = GitOperations.buildCommitMessage({
+    prompt: 'Fix nil pointer dereference in auth token refresh handler',
+    taskId: 'task-test-commit-msg',
+    taskFiles: ['auth/token.go', 'auth/token_test.go'],
+    filesAdded: 0,
+    filesModified: 2,
+    filesDeleted: 0,
+    verification: { passed: true, command: 'go test ./...' },
+    security: { passed: true }
+  });
+
+  assert.ok(msg.startsWith('fix: Fix nil pointer dereference in auth token refresh handler'));
+  assert.ok(msg.includes('Context:\n  Fix nil pointer dereference in auth token refresh handler'));
+  assert.ok(msg.includes('Changes Overview:\n- Added: 0, Modified: 2, Deleted: 0'));
+  assert.ok(msg.includes('* auth/token.go'));
+  assert.ok(msg.includes('* auth/token_test.go'));
+  assert.ok(msg.includes('Gate 1 (Implementation & Syntax): PASSED (go test ./...)'));
+  assert.ok(msg.includes('Gate 2 (Security & Secret Audit): PASSED'));
+  assert.ok(msg.includes('Gate 3 (Git Safety & Identity): PASSED'));
+  assert.ok(msg.includes('Task-ID: task-test-commit-msg'));
+});
+
+test('GitOperations: commitApprovedChanges preserves multi-line header and body via -F -', () => {
+  const repo = makeTempGitRepo('commit-multiline-');
+  const testFile = join(repo, 'feature.go');
+  writeFileSync(testFile, 'package main\n');
+
+  const multiLineMsg = `feat(core): add feature implementation\n\nDetailed body line 1\nDetailed body line 2\n\nTask-ID: 12345`;
+  const res = GitOperations.commitApprovedChanges(repo, ['feature.go'], multiLineMsg);
+
+  assert.equal(res.committed, true);
+  const log = execSync('git log -1 --pretty=format:%B', { cwd: repo, encoding: 'utf8' });
+  assert.equal(log.trim(), multiLineMsg.trim());
+});
+
+test('GitOperations: pushApprovedCommit pushes to multiple configured remotes in parallel without skipping', async () => {
+  // Create bare remotes
+  const bare1 = mkdtempSync(join(tmpdir(), 'remote1-'));
+  const bare2 = mkdtempSync(join(tmpdir(), 'remote2-'));
+  execSync('git init --bare -b main', { cwd: bare1, stdio: 'pipe' });
+  execSync('git init --bare -b main', { cwd: bare2, stdio: 'pipe' });
+
+  // Create workspace repo with both remotes configured
+  const repo = makeTempGitRepo('multi-remote-ws-');
+  execSync(`git remote add origin "${bare1}"`, { cwd: repo, stdio: 'pipe' });
+  execSync(`git remote add upstream "${bare2}"`, { cwd: repo, stdio: 'pipe' });
+
+  // Add a commit
+  writeFileSync(join(repo, 'hello.txt'), 'hello world\n');
+  const commitRes = GitOperations.commitApprovedChanges(repo, ['hello.txt'], 'feat: test multi remote');
+  assert.equal(commitRes.committed, true);
+
+  // Push with pushApprovedCommit (no explicit remotes -> should discover and push both origin and upstream)
+  const pushRes = await GitOperations.pushApprovedCommit({
+    workspacePath: repo,
+    branch: 'main',
+    expectedCommitSha: commitRes.commitSha
+  });
+
+  assert.equal(pushRes.success, true);
+  assert.ok(pushRes.remote.includes('origin'));
+  assert.ok(pushRes.remote.includes('upstream'));
+  assert.equal(pushRes.remotes.length, 2);
+  assert.ok(pushRes.remotes.every(r => r.success === true));
+
+  // Verify commit exists on both bare remotes
+  const sha1 = execSync('git rev-parse HEAD', { cwd: bare1, encoding: 'utf8' }).trim();
+  const sha2 = execSync('git rev-parse HEAD', { cwd: bare2, encoding: 'utf8' }).trim();
+  assert.equal(sha1, commitRes.commitSha);
+  assert.equal(sha2, commitRes.commitSha);
+
+  // Cleanup
+  rmSync(bare1, { recursive: true, force: true });
+  rmSync(bare2, { recursive: true, force: true });
 });

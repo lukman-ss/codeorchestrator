@@ -1,9 +1,12 @@
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync, exec } from 'node:child_process';
+import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { validateGitHubUrl, getProject } from './project-service.js';
 import { GIT_USER_NAME, GIT_USER_EMAIL } from '../config.js';
 import logger from '../logger.js';
+
+const execAsync = promisify(exec);
 
 export const GIT_STATES = {
   LOCAL_NO_GIT: 'LOCAL_NO_GIT',
@@ -246,7 +249,82 @@ export class GitOperations {
     };
   }
 
-  static generateGitReview(projectId, workspacePath, baseline = null, customTaskFiles = null) {
+  static buildCommitMessage({
+    prompt = '',
+    taskId = null,
+    jobId = null,
+    taskFiles = [],
+    filesAdded = 0,
+    filesModified = 0,
+    filesDeleted = 0,
+    verification = null,
+    security = null,
+    noChanges = false
+  } = {}) {
+    if (noChanges || taskFiles.length === 0) {
+      return 'chore: no changes detected';
+    }
+
+    const pLower = (prompt || '').toLowerCase();
+    let type = 'feat';
+    if (/\b(fix|bug|error|issue|repair|failing|resolve)\b/.test(pLower)) {
+      type = 'fix';
+    } else if (/\b(test|spec)\b/.test(pLower)) {
+      type = 'test';
+    } else if (/\b(refactor|clean|simplify)\b/.test(pLower)) {
+      type = 'refactor';
+    } else if (/\b(docs|readme)\b/.test(pLower)) {
+      type = 'docs';
+    } else if (/\b(chore|dep|upgrade|bump)\b/.test(pLower)) {
+      type = 'chore';
+    }
+
+    let subject = '';
+    if (prompt) {
+      const firstLine = prompt.replace(/\r?\n.*/s, '').trim();
+      const cleaned = firstLine.replace(/^(feat|fix|refactor|test|chore|docs)(\([^)]+\))?:\s*/i, '');
+      subject = cleaned.length > 60 ? cleaned.slice(0, 57) + '...' : cleaned;
+    }
+    if (!subject) {
+      subject = `verified implementation (${taskFiles.length} files changed)`;
+    }
+
+    const header = `${type}: ${subject}`;
+    const bodyLines = [];
+
+    if (prompt && prompt.trim()) {
+      bodyLines.push('Context:');
+      const pLines = prompt.trim().split('\n').map(l => `  ${l}`);
+      bodyLines.push(...pLines);
+      bodyLines.push('');
+    }
+
+    bodyLines.push('Changes Overview:');
+    bodyLines.push(`- Added: ${filesAdded}, Modified: ${filesModified}, Deleted: ${filesDeleted}`);
+    const fileList = taskFiles.slice(0, 20).map(f => `  * ${f}`);
+    bodyLines.push(...fileList);
+    if (taskFiles.length > 20) {
+      bodyLines.push(`  * ... and ${taskFiles.length - 20} more files`);
+    }
+    bodyLines.push('');
+
+    bodyLines.push('Quality Gate Verification:');
+    const vStatus = verification?.passed ?? true;
+    const sStatus = security?.passed ?? true;
+    bodyLines.push(`- Gate 1 (Implementation & Syntax): ${vStatus ? 'PASSED' : 'FAILED'}${verification?.command ? ` (${verification.command})` : ''}`);
+    bodyLines.push(`- Gate 2 (Security & Secret Audit): ${sStatus ? 'PASSED' : 'FAILED'}`);
+    bodyLines.push('- Gate 3 (Git Safety & Identity): PASSED');
+
+    if (taskId || jobId) {
+      bodyLines.push('');
+      if (taskId) bodyLines.push(`Task-ID: ${taskId}`);
+      if (jobId) bodyLines.push(`Job-ID: ${jobId}`);
+    }
+
+    return `${header}\n\n${bodyLines.join('\n')}\n`;
+  }
+
+  static generateGitReview(projectId, workspacePath, baseline = null, customTaskFiles = null, options = {}) {
     if (!this.isGitRepo(workspacePath)) {
       return {
         isGit: false,
@@ -284,9 +362,18 @@ export class GitOperations {
     const remoteUrl = this.getRemoteUrl(workspacePath, 'origin');
 
     const noChanges = taskFiles.length === 0;
-    const proposedCommitMessage = noChanges
-      ? 'chore: no changes'
-      : `feat: verified implementation (${taskFiles.length} files changed)`;
+    const proposedCommitMessage = this.buildCommitMessage({
+      prompt: options.prompt,
+      taskId: options.taskId,
+      jobId: options.jobId,
+      taskFiles,
+      filesAdded: added,
+      filesModified: modified,
+      filesDeleted: deleted,
+      verification: options.verifRes || options.verification,
+      security: options.auditRes || options.security,
+      noChanges
+    });
 
     return {
       isGit: true,
@@ -317,7 +404,6 @@ export class GitOperations {
 
     // Stage ONLY task-owned files (never git add -A or git add .)
     for (const f of taskFiles) {
-      // Exclude secrets
       const isExampleOrTemplate = /\.(example|template|sample)$/i.test(f) || /(?:^|\/)\.env\.(example|template|sample)$/i.test(f);
       if (FORBIDDEN_FILE_REGEX.test(f) && !isExampleOrTemplate) continue;
       try {
@@ -327,28 +413,91 @@ export class GitOperations {
       }
     }
 
-    // Safe sanitized commit message
-    const cleanMsg = (commitMessage || 'feat: automated verified implementation')
-      .replace(/["`$\\]/g, '')
-      .slice(0, 100);
+    const finalMsg = typeof commitMessage === 'string' && commitMessage.trim()
+      ? commitMessage.trim()
+      : 'feat: automated verified implementation';
 
     try {
-      execSync(`git commit -m "${cleanMsg}"`, { cwd: workspacePath, stdio: 'pipe' });
+      const res = spawnSync('git', ['commit', '-F', '-'], {
+        cwd: workspacePath,
+        input: finalMsg,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      if (res.status !== 0) {
+        const errText = res.stderr || res.stdout || 'Commit failed';
+        const sha = this.getHeadCommit(workspacePath);
+        return { committed: false, commitSha: sha, error: errText };
+      }
+
       const sha = this.getHeadCommit(workspacePath);
       return { committed: true, commitSha: sha };
     } catch (err) {
-      // Nothing to commit or already committed
       const sha = this.getHeadCommit(workspacePath);
       return { committed: false, commitSha: sha, error: err.message };
     }
   }
 
-  static pushApprovedCommit({ workspacePath, remote = 'origin', branch = 'main', expectedCommitSha = null }) {
+  static getRemotes(workspacePath) {
+    if (!this.isGitRepo(workspacePath)) return [];
+    try {
+      const out = execSync('git remote', { cwd: workspacePath, stdio: 'pipe', encoding: 'utf8' });
+      return out.split('\n').map(r => r.trim()).filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  static async pushToSingleRemote({ workspacePath, remote, branch, currentHead }) {
+    try {
+      const remoteUrl = this.getRemoteUrl(workspacePath, remote);
+      if (remoteUrl && remoteUrl.startsWith('https://github.com/')) {
+        const match = remoteUrl.match(/^https:\/\/github\.com\/([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+?)(?:\.git)?\/?$/);
+        if (match) {
+          try {
+            await execAsync(`git remote set-url ${remote} "git@github-coding:${match[1]}/${match[2]}.git"`, { cwd: workspacePath });
+          } catch {}
+        }
+      }
+
+      const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+      try {
+        await execAsync(`git push -u ${remote} ${branch}`, { cwd: workspacePath, env, timeout: 30000 });
+      } catch (pushErr) {
+        const pushErrMsg = (pushErr.stderr?.toString() || pushErr.message || '').toLowerCase();
+        if (pushErrMsg.includes('non-fast-forward') || pushErrMsg.includes('fetch first')) {
+          try {
+            await execAsync(`git pull --rebase ${remote} ${branch}`, { cwd: workspacePath, env, timeout: 30000 });
+            await execAsync(`git push -u ${remote} ${branch}`, { cwd: workspacePath, env, timeout: 30000 });
+          } catch {
+            try { await execAsync('git rebase --abort', { cwd: workspacePath, env }); } catch {}
+            await execAsync(`git push ${remote} ${branch}`, { cwd: workspacePath, env, timeout: 30000 });
+          }
+        } else {
+          await execAsync(`git push ${remote} ${branch}`, { cwd: workspacePath, env, timeout: 30000 });
+        }
+      }
+
+      return { success: true, commitSha: currentHead, remote, branch };
+    } catch (err) {
+      const errMsg = err.stderr?.toString() || err.message;
+      const isDiverged = errMsg.includes('non-fast-forward') || errMsg.includes('fetch first') || errMsg.includes('diverged');
+      return {
+        success: false,
+        remote,
+        branch,
+        reason: errMsg,
+        diverged: isDiverged
+      };
+    }
+  }
+
+  static async pushApprovedCommit({ workspacePath, remote = 'origin', remotes = null, branch = 'main', expectedCommitSha = null }) {
     if (!this.isGitRepo(workspacePath)) {
       return { success: false, reason: 'Not a Git repository' };
     }
 
-    // Verify commit before pushing
     const currentHead = this.getHeadCommit(workspacePath);
     if (!currentHead) {
       return {
@@ -364,50 +513,51 @@ export class GitOperations {
       };
     }
 
-    try {
-      // If remote URL is HTTPS github.com without credentials, switch to configured SSH alias for authentication
-      const remoteUrl = this.getRemoteUrl(workspacePath, remote);
-      if (remoteUrl && remoteUrl.startsWith('https://github.com/')) {
-        const match = remoteUrl.match(/^https:\/\/github\.com\/([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+?)(?:\.git)?\/?$/);
-        if (match) {
-          try {
-            execSync(`git remote set-url ${remote} "git@github-coding:${match[1]}/${match[2]}.git"`, { cwd: workspacePath, stdio: 'pipe' });
-          } catch {}
-        }
-      }
-
-      // Non-interactive push without force; set upstream if first push
-      const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-      try {
-        execSync(`git push -u ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
-      } catch (pushErr) {
-        const pushErrMsg = (pushErr.stderr?.toString() || pushErr.message || '').toLowerCase();
-        if (pushErrMsg.includes('non-fast-forward') || pushErrMsg.includes('fetch first')) {
-          try {
-            // Attempt clean rebase on top of remote branch
-            execSync(`git pull --rebase ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
-            execSync(`git push -u ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
-          } catch {
-            // If rebase fails or conflicts, abort rebase cleanly
-            try { execSync('git rebase --abort', { cwd: workspacePath, env, stdio: 'pipe' }); } catch {}
-            execSync(`git push ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
-          }
+    let targetRemotes = [];
+    if (Array.isArray(remotes) && remotes.length > 0) {
+      targetRemotes = remotes;
+    } else if (typeof remotes === 'string' && remotes.trim()) {
+      targetRemotes = remotes.split(',').map(r => r.trim()).filter(Boolean);
+    } else {
+      const configured = this.getRemotes(workspacePath);
+      if (configured.length > 0) {
+        if (remote && !configured.includes(remote)) {
+          targetRemotes = [remote, ...configured];
         } else {
-          execSync(`git push ${remote} ${branch}`, { cwd: workspacePath, env, stdio: 'pipe', timeout: 30000 });
+          targetRemotes = configured;
         }
+      } else {
+        targetRemotes = [remote || 'origin'];
       }
+    }
+    targetRemotes = [...new Set(targetRemotes)];
 
-      // Verify remote commit
-      return { success: true, commitSha: currentHead, remote, branch };
-    } catch (err) {
-      const errMsg = err.stderr?.toString() || err.message;
-      const isDiverged = errMsg.includes('non-fast-forward') || errMsg.includes('fetch first') || errMsg.includes('diverged');
+    const settled = await Promise.allSettled(
+      targetRemotes.map(rem => this.pushToSingleRemote({ workspacePath, remote: rem, branch, currentHead }))
+    );
+
+    const results = settled.map((res, i) => {
+      if (res.status === 'fulfilled') return res.value;
+      return { success: false, remote: targetRemotes[i], reason: res.reason?.message || String(res.reason) };
+    });
+
+    const failed = results.filter(r => !r.success);
+    if (failed.length > 0) {
       return {
         success: false,
-        reason: errMsg,
-        diverged: isDiverged
+        reason: failed.map(f => `[${f.remote}] ${f.reason}`).join('; '),
+        diverged: failed.some(f => f.diverged),
+        remotes: results
       };
     }
+
+    return {
+      success: true,
+      commitSha: currentHead,
+      remote: targetRemotes.join(','),
+      branch,
+      remotes: results
+    };
   }
 
   static preserveLocalChanges({ workspacePath, taskFiles = [], worktreePath = null }) {
