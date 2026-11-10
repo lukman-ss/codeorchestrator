@@ -1,85 +1,117 @@
 # Getting Started
 
-This guide explains how to install, configure, and execute your first coding tasks with Coding Orchestrator.
+Panduan ini menjelaskan cara memasang, konfigurasi, dan menjalankan tugas coding pertama dengan Coding Orchestrator.
 
 ## Prerequisites
 
-- **Operating System**: Linux (Debian 12/13, Ubuntu 22.04/24.04 recommended).
-- **Node.js**: Node.js 24.x LTS (ESM modules supported natively).
-- **Git**: Git 2.30+ installed and configured with `user.name` and `user.email`.
-- **OpenCode**: Installed globally or locally accessible in your PATH.
-- **SQLite**: Better-sqlite3 native compilation toolchain (`python3`, `make`, `g++`).
+- **OS**: Linux (Debian 13 / Ubuntu 24.04).
+- **Node.js**: v24.x (`node -v`).
+- **npm**: v11.x (`npm -v`).
+- **Git**: 2.30+ dengan `user.name` dan `user.email` terkonfigurasi.
+- **OpenCode CLI**: Terpasang di `$HOME/.opencode/bin/opencode`.
+- **PM2**: Terpasang di `$HOME/.local/npm/bin/pm2`.
 
-## Quick Start in 5 Minutes
+> **Penting**: `opencode` adalah engine upstream yang dipanggil oleh CodeOrchestrator. `co tui` adalah TUI dashboard CodeOrchestrator — bukan OpenCode langsung. Jangan tertukar.
+
+## Quick Start
 
 ### 1. Clone & Install Dependencies
 
 ```bash
-git clone <REPOSITORY_URL> coding-orchestrator
+cd /home/lukman-ss
+git clone git@github.com:lukman-ss/codeorchestrator.git coding-orchestrator
 cd coding-orchestrator
 npm ci
 ```
 
-### 2. Configure Environment
+`package-lock.json` sudah memiliki `resolved` URL untuk semua dependency termasuk `better-sqlite3`. Tidak perlu `npm rebuild` pada sistem standar.
 
-Copy the provided example environment template:
+### 2. Konfigurasi Environment
 
 ```bash
 cp .env.example .env
+chmod 600 .env
 ```
 
-Edit `.env` to configure your API authentication token and LLM provider credentials:
+Edit `.env` dan ganti semua placeholder `/path/to/...` dengan path absolut Anda:
 
 ```ini
-PORT=4000
-HOST=127.0.0.1
-REQUIRE_AUTH=true
-ORCHESTRATOR_API_TOKEN=generate-a-secure-random-token-here
+# Replace placeholder paths with actual values
+ORCHESTRATOR_ROOT=/home/lukman-ss/coding-orchestrator
+WORKSPACE_ROOT=/home/lukman-ss/workspace
+DATABASE_PATH=/home/lukman-ss/coding-orchestrator/data/orchestrator.db
+AGENT_WORKTREE_ROOT=/home/lukman-ss/workspace/.agent-worktrees
+OPENCODE_BIN=/home/lukman-ss/.opencode/bin/opencode
 
-NINEROUTER_API_KEY=your-actual-llm-gateway-key
-DEFAULT_MODEL=9router/ayce-combo
+# Fill in secrets
+ORCHESTRATOR_API_TOKEN=<generate-secure-random-token>
+NINEROUTER_API_KEY=<your-9router-api-key>
 ```
 
-### 3. Verify Local Security Gates
+**Verifikasi tidak ada placeholder yang tertinggal:**
+```bash
+grep -n '/path/to' .env
+# Tidak ada output = aman
+```
 
-Run the local security gate to ensure no credentials or forbidden patterns are exposed:
+> `ORCHESTRATOR_API_TOKEN` dan `NINEROUTER_API_KEY` adalah secret yang berbeda. Jangan pernah mencetak nilainya di dokumentasi atau log.
+
+### 3. Jalankan Server dengan PM2
 
 ```bash
-npm run security-check # or bash scripts/security-check.sh
+export PATH="$HOME/.local/npm/bin:$HOME/.opencode/bin:$PATH"
+cd /home/lukman-ss/coding-orchestrator
+pm2 start ecosystem.config.cjs
+pm2 status
+pm2 logs coding-orchestrator --lines 20
 ```
 
-### 4. Run Automated Tests
+Server mulai. Health check:
+```bash
+curl -s -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN" http://127.0.0.1:4000/health
+```
 
-Execute the built-in Node.js test suite:
+> **Catatan**: `npm start` menjalankan `node src/server.js` **tanpa** memuat `.env`. Gunakan PM2 atau `node --env-file=.env src/server.js` agar `.env` terbaca. Tanpa `.env`, server akan exit dengan error `missing_auth_token`.
+
+### 4. Pasang CLI & Buka TUI
 
 ```bash
-npm test
+# Pasang binary co secara global untuk user
+npm install --global --prefix $HOME/.local/npm /home/lukman-ss/coding-orchestrator
+
+# Verifikasi
+command -v co
+command -v opencode
+command -v pm2
+
+# Buka TUI CodeOrchestrator (server harus sudah online)
+co tui
 ```
 
-### 5. Start the Server
+`co tui` menampilkan dashboard terminal CodeOrchestrator dengan panel proyek, task, dan approval.
+
+### 5. Daftarkan Proyek (Opsional)
+
+Jika sudah ada repository yang di-clone ke workspace, daftarkan ke database:
 
 ```bash
-npm start
+# Contoh: import proyek yang sudah di-clone
+co project import /home/lukman-ss/workspace/my-project
 ```
 
-Verify service readiness in another terminal:
+`GET /projects` akan mengembalikan daftar proyek setelah import.
+
+### 6. Tes Task Pertama
 
 ```bash
-curl -H "Authorization: Bearer <YOUR_TOKEN>" http://127.0.0.1:4000/health
+co task create my-project "Tambahkan fitur X ke file Y"
 ```
 
-Expected response:
+---
 
-```json
-{
-  "status": "ok",
-  "pid": 12345,
-  "globalRunning": 0,
-  "queueDepth": 0,
-  "diskFreeMB": 24000,
-  "diskUsagePercent": 18,
-  "diskThresholdMB": 2048
-}
-```
+## Next Steps
 
-Next steps: See [API Reference](api-reference.md) and [Task Lifecycle](task-lifecycle.md).
+- [API Reference](api-reference.md) — endpoint REST lengkap
+- [Task Lifecycle](task-lifecycle.md) — alur task dari submit sampai completion
+- [Operations](operations.md) — prosedur operasional harian
+- [Troubleshooting](troubleshooting.md) — diagnosis masalah umum

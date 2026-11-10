@@ -1,41 +1,46 @@
 # Operations Guide
 
-This guide provides operational procedures for maintaining, monitoring, and inspecting Coding Orchestrator in production.
+Panduan operasional untuk memantau dan mengelola Coding Orchestrator yang berjalan di bawah PM2.
 
-## Service Management
+## Service Management (PM2)
 
 ```bash
-# Check service status
-systemctl --user status coding-orchestrator
+# Cek status proses
+pm2 status
 
-# View live systemd logs
-journalctl --user -u coding-orchestrator -f
+# Lihat log real-time
+pm2 logs coding-orchestrator -f
 
-# Restart the service
-systemctl --user restart coding-orchestrator
+# Restart setelah perubahan konfigurasi / env
+pm2 restart coding-orchestrator
 
-# Stop the service gracefully
-systemctl --user stop coding-orchestrator
+# Hentikan
+pm2 stop coding-orchestrator
+
+# Simpan state agar pulih otomatis saat reboot
+pm2 save
 ```
 
-During graceful stop, the service finishes or terminates active child processes within `TASK_KILL_GRACE_SECONDS`, flushes the database WAL checkpoint, and closes open WebSocket connections.
+Selama graceful shutdown, server menyelesaikan atau mematikan child process aktif dalam `TASK_KILL_GRACE_SECONDS`, melakukan WAL checkpoint pada database SQLite, dan menutup koneksi WebSocket.
 
 ---
 
 ## Log Inspection
 
-### 1. Active Application Logs
+### 1. Aplikasi utama
+
 ```bash
 tail -f logs/application.log
 ```
 
-Format logs into human-readable text using `pino-pretty` (if installed):
+Format JSON pino. Untuk human-readable:
+
 ```bash
 tail -f logs/application.log | npx pino-pretty
 ```
 
-### 2. Task Execution Logs
-Inspect the stdout/stderr emitted by an individual task process:
+### 2. Task execution logs
+
 ```bash
 cat logs/tasks/<TASK_ID>.log
 ```
@@ -44,49 +49,41 @@ cat logs/tasks/<TASK_ID>.log
 
 ## SQLite Database Inspection
 
-Inspect database status using the `sqlite3` CLI:
-
 ```bash
-# Connect to SQLite database in read-only mode
-sqlite3 file:data/orchestrator.db?mode=ro
+sqlite3 data/orchestrator.db ".tables"
 ```
 
-### Useful Operational Queries:
+Query useful:
 
 ```sql
--- View queue summary
+-- Queue summary
 SELECT status, count(*) FROM tasks GROUP BY status;
 
--- View currently running tasks and PIDs
+-- Running tasks & PIDs
 SELECT id, project_id, status, pid, started_at FROM tasks WHERE status = 'running';
 
--- Inspect multi-agent job completion rates
-SELECT id, status, total_requirements, verified_requirements, completion_percent, final_audit_verdict FROM jobs ORDER BY created_at DESC LIMIT 5;
+-- Recent jobs
+SELECT id, status, completion_percent FROM jobs ORDER BY created_at DESC LIMIT 5;
 
--- Check for active integration locks
+-- Active integration locks
 SELECT * FROM integration_locks;
-
--- Review recent audit failures
-SELECT subtask_id, verdict, findings_json, summary FROM agent_audits WHERE verdict = 'FAILED' ORDER BY created_at DESC LIMIT 5;
 ```
 
 ---
 
 ## Storage & Capacity Maintenance
 
-### Disk Free Verification
-The orchestrator checks disk space automatically:
+### Disk free check
 ```bash
-curl -s -H "Authorization: Bearer <TOKEN>" http://127.0.0.1:4000/health | jq '{diskFreeMB, diskUsagePercent}'
+curl -s -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN" http://127.0.0.1:4000/health | jq '{diskFreeMB, diskUsagePercent}'
 ```
 
-### Clearing Orphaned Integration Locks
-If a server crash occurs during an integration merge and leaves a dangling lock:
+### Clear orphaned integration locks (jika crash)
 ```bash
 sqlite3 data/orchestrator.db "DELETE FROM integration_locks WHERE acquired_at < datetime('now', '-1 hour');"
 ```
 
-### Forcing WAL Checkpointing
+### Force WAL checkpoint
 ```bash
 sqlite3 data/orchestrator.db "PRAGMA wal_checkpoint(TRUNCATE);"
 ```

@@ -44,7 +44,9 @@ Coding Orchestrator is configured via environment variables or a local `.env` fi
 | `CLEANUP_INTERVAL_HOURS` | Number | `24` | Interval in hours between background database cleanup cycles. |
 | `MIN_FREE_DISK_MB` | Number | `2048` | Minimum free disk space in megabytes required to accept new tasks. |
 | `MAX_DISK_USAGE_PERCENT` | Number | `90` | Maximum disk percentage capacity allowed before blocking execution. |
-| `DISK_CHECK_INTERVAL_SECONDS`| Number | `60` | Frequency of disk status polling. |
+| `DISK_CHECK_INTERVAL_SECONDS` | Number | `60` | Frequency of disk status polling. |
+| `ORCHESTRATOR_API_URL` | String | `http://127.0.0.1:${PORT}` | Base URL for REST API used by CLI/TUI client. |
+| `ORCHESTRATOR_WS_URL` | String | `ws://127.0.0.1:${PORT}/ws` | WebSocket URL used by TUI client. |
 
 ## Example `.env` Setup
 

@@ -29,26 +29,26 @@ A lightweight, robust Node.js orchestration service providing REST and WebSocket
                     | Fastify & ws Server (:4000)|
                     +-------------+-------------+
                                   |
-             +--------------------+--------------------+
-             |                    |                    |
-             v                    v                    v
-     +---------------+    +---------------+    +---------------+
-     | ProjectService|    | SessionService|    |  TaskQueue    |
-     +-------+-------+    +-------+-------+    +-------+-------+
-             |                    |                    |
-             |       +------------+------------+       |
-             |       |                         |       |
-             v       v                         v       v
-      +-------------+-------------+      +---------------+
-      |  Workspace  |   Runtime   |      |  TaskService  |
-      |   Storage   |   Storage   |      +-------+-------+
-      | (Projects)  |(Standalone) |              |
-      +-------------+-------------+              v
-                     |                   +---------------+
-                     v                   | opencode CLI  |
-              +---------------+          +---------------+
-              | SQLite (WAL)  |
-              +---------------+
+              +--------------------+--------------------+
+              |                    |                    |
+              v                    v                    v
+      +---------------+    +---------------+    +---------------+
+      | ProjectService|    | SessionService|    |  TaskQueue    |
+      +-------+-------+    +-------+-------+    +-------+-------+
+              |                    |                    |
+              |       +------------+------------+       |
+              |       |                         |       |
+              v       v                         v       v
+       +-------------+-------------+      +---------------+
+       |  Workspace  |   Runtime   |      |  TaskService  |
+       |   Storage   |   Storage   |      +-------+-------+
+       | (Projects)  |(Standalone) |              |
+       +-------------+-------------+              v
+                      |                   +---------------+
+                      v                   | opencode CLI  |
+               +---------------+          +---------------+
+               | SQLite (WAL)  |
+               +---------------+
 ```
 
 For complete architecture details, see [Architecture](docs/architecture.md).
@@ -60,27 +60,46 @@ For complete architecture details, see [Architecture](docs/architecture.md).
 - Node.js 24+
 - OpenCode CLI installed and available in `$PATH`
 - Git 2.30+
+- PM2 installed for your user (`$HOME/.local/npm/bin/pm2`)
 
 ### Installation & Run
 
-1. Clone and install dependencies:
+1. **Clone & install dependencies**
    ```bash
-   git clone <repository-url>
+   git clone git@github.com:lukman-ss/codeorchestrator.git coding-orchestrator
    cd coding-orchestrator
-   npm install
+   npm ci
    ```
 
-2. Configure environment:
+2. **Configure environment**
    ```bash
    cp .env.example .env
+   chmod 600 .env
+   # Edit .env: replace all /path/to/... placeholders with your absolute paths
+   # Fill ORCHESTRATOR_API_TOKEN and NINEROUTER_API_KEY
    ```
 
-3. Start server:
+3. **Start server with PM2**
    ```bash
-   npm start
+   pm2 start ecosystem.config.cjs
+   pm2 status
+   pm2 logs coding-orchestrator --lines 20
    ```
 
-For detailed guides, see [Getting Started](docs/getting-started.md) and [Installation](docs/installation.md).
+4. **Install CLI & open TUI**
+   ```bash
+   npm install --global --prefix $HOME/.local/npm .
+   command -v co
+   co tui
+   ```
+
+### Detailed Guides
+
+- **[Getting Started](docs/getting-started.md)** — Installation, configuration, first task
+- **[Configuration](docs/configuration.md)** — Environment variables reference
+- **[Deployment](docs/deployment.md)** — PM2 setup, restarts, recovery after reboot
+- **[Operations](docs/operations.md)** — Monitoring, logs, database inspection
+- **[Troubleshooting](docs/troubleshooting.md)** — Common issues and fixes
 
 ## Configuration
 
@@ -96,77 +115,22 @@ Core settings configured via environment variables:
 | `MAX_CONCURRENT_TASKS` | `2` | Global concurrent task execution limit |
 | `MAX_CONCURRENT_TASKS_PER_PROJECT` | `1` | Per-project concurrent task execution limit |
 | `ORCHESTRATOR_API_TOKEN` | *None* | Bearer token for API authentication |
+| `ORCHESTRATOR_API_URL` | `http://127.0.0.1:4000` | Base URL for CLI/TUI client API calls |
 
 See [Configuration Guide](docs/configuration.md) for all options.
 
 ## API & WebSocket Summary
 
 - **Health Probes**: `GET /health`, `GET /ready`
-- **Sessions**:
-  - `POST /sessions`: Create standalone session (`project_id = NULL`) or project session
-  - `GET /sessions`: List sessions (supports `?type=standalone`, `?projectId=<id>`, `?userId=<id>`)
-  - `GET /sessions/:id`: Retrieve session details
-  - `PATCH /sessions/:id`: Update title, model, or status
-  - `DELETE /sessions/:id`: Remove session and cascade messages
-  - `POST /sessions/:id/messages`: Execute interactive message with real OpenCode continuation
-  - `GET /sessions/:id/messages`: View message history
-- **Projects**:
-  - `POST /projects`: Create project workspace (`isTest: true` for test isolation)
-  - `GET /projects`: List production projects (`?includeTest=true` to include test projects)
-  - `GET /projects/:id`: Get project details
-  - `PATCH /projects/:id`: Update project settings
-  - `POST /projects/import`: Register existing workspace directory
-  - `POST /projects/:id/sessions`: Create session scoped to project workspace
-  - `GET /projects/:id/sessions`: List sessions for project
-- **Tasks**: `POST /projects/:id/tasks`, `GET /tasks`, `GET /tasks/:id`, `POST /tasks/:id/cancel`
-- **Approvals & Completion Gates**:
-  - `GET /approvals/pending`: List pending Git approval requests
-  - `GET /approvals/:id`: Retrieve specific approval request
-  - `POST /approvals/:id/decide`: Submit decision (`push`, `keep_local`, or `reject`)
-  - `GET /tasks/:id/review`: Retrieve 3-gate workflow review and approval state for task
-  - `GET /jobs/:id/review`: Retrieve 3-gate workflow review and approval state for job
-  - `GET /tasks/:id/security-audit`: Retrieve security audit findings and limitations for task
-  - `GET /jobs/:id/security-audit`: Retrieve security audit findings and limitations for job
-- **WebSocket**: Connect to `ws://HOST:PORT/ws` and subscribe with `{ "type": "subscribe", "taskId": "<id>" }`
+- **Sessions**: `POST /sessions`, `GET /sessions/:id`, `POST /sessions/:id/messages`
+- **Projects**: `POST /projects`, `GET /projects`, `POST /projects/import`
+- **Tasks**: `POST /projects/:id/tasks`, `GET /tasks`, `GET /tasks/:id`
+- **Approvals**: `GET /approvals/pending`, `POST /approvals/:id/decide`
+- **WebSocket**: Connect to `ws://HOST:PORT/ws` and subscribe
 
 ## Discord Bot Integration
 
-CodeOrchestrator includes an isolated Discord Bridge (`integrations/discord/`) implementing natural chat conversations and slash commands under `/code`:
-
-- **Natural Chat Interaction**:
-  - Mention `@Agent Coding <prompt>` in any authorized channel to start or continue an active standalone session.
-  - Reply directly to any bot message to continue that specific conversation branch (routes back to the exact historical OpenCode session).
-  - Support for long specifications via `.txt` and `.md` file attachments (up to 256KB) with SHA-256 integrity digests and restrictive `0600` artifact storage.
-  - Multipart prompt collection (`/code prompt start`, `/code prompt submit`, `/code prompt cancel`) assembled across message chunks and persisted across bot restarts.
-  - Interactive specification acknowledgment card with `[Execute]` and `[Cancel]` buttons guarded by cross-user authorization.
-  - One active standalone session per user per channel/thread; cross-user isolation prevents hijacking.
-  - Automatic multi-chunk handling: splits messages <= 1,900 chars; attaches sanitized `.txt` file when response exceeds 3 chunks.
-  - Graceful fallback on `GatewayIntentBits.MessageContent` if privileged intent is pending in Discord Developer Portal.
-- **Slash Commands**:
-  - `/code session new title:<text> [project:<name>] [model:<model>]`: Explicitly create a standalone or project-linked session
-  - `/code session info [session:<id>]`: View session metadata, turn count, and token usage
-  - `/code session close [session:<id>]`: Archive active conversation without deleting history
-  - `/code chat prompt:<text> [session:<id>] [model:<model>]`: Start or continue a conversation
-  - `/code resume session:<id> prompt:<text>`: Send follow-up prompt to an existing OpenCode session
-  - `/code sessions [project:<name>] [page:<num>]`: List authorized standalone and project sessions
-  - `/code project create`: Create a persistent project workspace via an interactive modal form and confirmation card
-  - `/code project import`: Register an unmanaged directory under workspace root with stack detection
-  - `/code project info`: Inspect project details, git remote, default branch, model, and active sessions
-  - `/code project repair`: Safely repair repository remote metadata without mutating or deleting existing checkouts
-  - `/code prompt start|submit|cancel`: Collect, assemble, or abort multipart specifications across Discord messages
-  - `/code projects`: View accessible persistent coding workspaces with relative slugs and Git status
-  - `/code run`: Submit single coding tasks to a project workspace
-  - `/code job`: Submit multi-agent workflows with automated worker, auditor, and integration roles
-  - `/code status`: Real-time task, job, or session status inspection
-  - `/code audit`: Independent auditor findings and verification evidence
-  - `/code report`: Final execution summaries
-  - `/code approvals [project:<name>]`: List pending Git review requests awaiting human decision
-  - `/code review id:<id>`: View 3-gate review card with interactive `[Push to GitHub]`, `[Keep Local]`, and `[Reject]` buttons
-  - `/code approve id:<id> decision:<push|keep_local|reject>`: Submit human approval decision directly
-  - `/code cancel`: Idempotent task/job cancellation with explicit confirmation
-  - `/code help`: Command usage summary
-
-For full documentation and systemd setup, see [Discord Integration Guide](docs/discord-integration.md).
+CodeOrchestrator includes an isolated Discord Bridge (`integrations/discord/`) implementing natural chat conversations and slash commands under `/code`. For full documentation, see [Discord Integration Guide](docs/discord-integration.md).
 
 ## Documentation Index
 
